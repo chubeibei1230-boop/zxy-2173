@@ -1,0 +1,340 @@
+import uuid
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
+from collections import defaultdict
+
+from models import (
+    ColorCard, ColorCardCreate, CardStatus, RiskAlert, RiskType,
+    ProofingRecord, InspectionRecord, ReworkRecord, ConfirmationRecord,
+    FilterParams, HighReworkBatchStats, PendingInspectionStats, ConfirmationCycleStats
+)
+from config import (
+    REWORK_THRESHOLD, INSPECTION_OVERDUE_HOURS,
+    COLOR_DIFFERENCE_CLUSTER_THRESHOLD, TEAM_HIGH_REWORK_RATE_THRESHOLD
+)
+
+
+class MemoryStorage:
+    def __init__(self):
+        self.cards: Dict[str, ColorCard] = {}
+        self._init_sample_data()
+
+    def _init_sample_data(self):
+        sample_cards = [
+            {
+                "customer_code": "C001",
+                "fabric_type": "棉布",
+                "color_card_version": "V1",
+                "responsible_team": "A组"
+            },
+            {
+                "customer_code": "C002",
+                "fabric_type": "涤纶",
+                "color_card_version": "V2",
+                "responsible_team": "B组"
+            }
+        ]
+        for card_data in sample_cards:
+            card = ColorCard(
+                id=str(uuid.uuid4()),
+                **card_data
+            )
+            self.cards[card.id] = card
+
+    def create_card(self, card_create: ColorCardCreate) -> ColorCard:
+        for card in self.cards.values():
+            if (card.customer_code == card_create.customer_code and
+                card.fabric_type == card_create.fabric_type and
+                card.color_card_version == card_create.color_card_version and
+                card.status not in [CardStatus.DISCARDED, CardStatus.CONFIRMED]):
+                raise ValueError(f"客户 {card_create.customer_code} 的 {card_create.fabric_type} 在版本 {card_create.color_card_version} 下已存在有效色卡")
+
+        card_id = str(uuid.uuid4())
+        card = ColorCard(
+            id=card_id,
+            **card_create.model_dump()
+        )
+        self.cards[card_id] = card
+        return card
+
+    def get_card(self, card_id: str) -> Optional[ColorCard]:
+        return self.cards.get(card_id)
+
+    def list_cards(self, filters: FilterParams) -> Tuple[List[ColorCard], int]:
+        result = list(self.cards.values())
+
+        if filters.customer_code:
+            result = [c for c in result if c.customer_code == filters.customer_code]
+        if filters.fabric_type:
+            result = [c for c in result if c.fabric_type == filters.fabric_type]
+        if filters.dye_vat_batch:
+            result = [c for c in result if any(
+                pr.dye_vat_batch == filters.dye_vat_batch for pr in c.proofing_records
+            )]
+        if filters.color_card_version:
+            result = [c for c in result if c.color_card_version == filters.color_card_version]
+        if filters.status:
+            result = [c for c in result if c.status == filters.status]
+        if filters.start_date:
+            start_dt = datetime.combine(filters.start_date, datetime.min.time())
+            result = [c for c in result if c.created_at >= start_dt]
+        if filters.end_date:
+            end_dt = datetime.combine(filters.end_date, datetime.max.time())
+            result = [c for c in result if c.created_at <= end_dt]
+        if filters.inspection_conclusion:
+            result = [c for c in result if any(
+                ir.conclusion == filters.inspection_conclusion for ir in c.inspection_records
+            )]
+
+        total = len(result)
+        result = result[filters.skip:filters.skip + filters.limit]
+        return result, total
+
+    def update_card_status(self, card_id: str, new_status: CardStatus) -> ColorCard:
+        card = self.get_card(card_id)
+        if not card:
+            raise ValueError(f"色卡 {card_id} 不存在")
+        card.status = new_status
+        card.updated_at = datetime.now()
+        return card
+
+    def add_proofing(self, card_id: str, dye_vat_batch: str, proofing_process: str) -> ColorCard:
+        card = self.get_card(card_id)
+        if not card:
+            raise ValueError(f"色卡 {card_id} 不存在")
+        if card.status not in [CardStatus.PENDING_PROOFING, CardStatus.REWORKING]:
+            raise ValueError(f"当前状态 {card.status} 不允许提交打样")
+
+        record = ProofingRecord(
+            id=str(uuid.uuid4()),
+            dye_vat_batch=dye_vat_batch,
+            proofing_process=proofing_process
+        )
+        card.proofing_records.append(record)
+        card.status = CardStatus.PENDING_INSPECTION
+        card.submitted_for_inspection_at = datetime.now()
+        card.updated_at = datetime.now()
+        self._check_risks(card)
+        return card
+
+    def add_inspection(self, card_id: str, color_comparison_result: str,
+                       color_difference_value: Optional[float], inspector: str, conclusion: str) -> ColorCard:
+        card = self.get_card(card_id)
+        if not card:
+            raise ValueError(f"色卡 {card_id} 不存在")
+        if card.status != CardStatus.PENDING_INSPECTION:
+            raise ValueError(f"当前状态 {card.status} 不允许提交质检")
+
+        record = InspectionRecord(
+            id=str(uuid.uuid4()),
+            color_comparison_result=color_comparison_result,
+            color_difference_value=color_difference_value,
+            inspector=inspector,
+            conclusion=conclusion
+        )
+        card.inspection_records.append(record)
+        card.updated_at = datetime.now()
+        self._check_risks(card)
+        return card
+
+    def add_rework(self, card_id: str, rework_action: str, reason: str, operator: str) -> ColorCard:
+        card = self.get_card(card_id)
+        if not card:
+            raise ValueError(f"色卡 {card_id} 不存在")
+        if card.status != CardStatus.PENDING_INSPECTION:
+            raise ValueError(f"当前状态 {card.status} 不允许返调")
+        if not card.inspection_records:
+            raise ValueError("返调前必须存在质检结论")
+
+        record = ReworkRecord(
+            id=str(uuid.uuid4()),
+            rework_action=rework_action,
+            reason=reason,
+            operator=operator
+        )
+        card.rework_records.append(record)
+        card.status = CardStatus.REWORKING
+        card.updated_at = datetime.now()
+        self._check_risks(card)
+        return card
+
+    def confirm_card(self, card_id: str, result: str, confirmer: str) -> ColorCard:
+        card = self.get_card(card_id)
+        if not card:
+            raise ValueError(f"色卡 {card_id} 不存在")
+        if card.status != CardStatus.PENDING_INSPECTION:
+            raise ValueError(f"当前状态 {card.status} 不允许确认")
+        if not card.inspection_records:
+            raise ValueError("确认前必须存在质检结论")
+
+        record = ConfirmationRecord(
+            id=str(uuid.uuid4()),
+            result=result,
+            confirmer=confirmer
+        )
+        card.confirmation_record = record
+        card.status = CardStatus.CONFIRMED
+        card.updated_at = datetime.now()
+        return card
+
+    def discard_card(self, card_id: str, reason: str) -> ColorCard:
+        card = self.get_card(card_id)
+        if not card:
+            raise ValueError(f"色卡 {card_id} 不存在")
+        card.discard_reason = reason
+        card.status = CardStatus.DISCARDED
+        card.updated_at = datetime.now()
+        return card
+
+    def _add_risk_alert(self, card: ColorCard, risk_type: RiskType, message: str):
+        existing = any(a.type == risk_type and not a.resolved for a in card.risk_alerts)
+        if not existing:
+            alert = RiskAlert(
+                id=str(uuid.uuid4()),
+                type=risk_type,
+                message=message
+            )
+            card.risk_alerts.append(alert)
+
+    def _check_risks(self, card: ColorCard):
+        if len(card.rework_records) >= REWORK_THRESHOLD:
+            self._add_risk_alert(
+                card, RiskType.REWORK_EXCEED_THRESHOLD,
+                f"返调次数已达 {len(card.rework_records)} 次，超过阈值 {REWORK_THRESHOLD} 次"
+            )
+
+        if card.status == CardStatus.PENDING_INSPECTION and card.submitted_for_inspection_at:
+            overdue_time = card.submitted_for_inspection_at + timedelta(hours=INSPECTION_OVERDUE_HOURS)
+            if datetime.now() > overdue_time:
+                self._add_risk_alert(
+                    card, RiskType.INSPECTION_OVERDUE,
+                    f"质检已超期 {INSPECTION_OVERDUE_HOURS} 小时"
+                )
+
+    def detect_color_difference_cluster(self) -> List[HighReworkBatchStats]:
+        batch_rework_count: Dict[str, int] = defaultdict(int)
+        batch_card_count: Dict[str, set] = defaultdict(set)
+
+        for card in self.cards.values():
+            for record in card.rework_records:
+                for proofing in card.proofing_records:
+                    batch_rework_count[proofing.dye_vat_batch] += 1
+                    batch_card_count[proofing.dye_vat_batch].add(card.id)
+
+        result = []
+        for batch, count in batch_rework_count.items():
+            if count >= COLOR_DIFFERENCE_CLUSTER_THRESHOLD:
+                for card in self.cards.values():
+                    if batch in [p.dye_vat_batch for p in card.proofing_records]:
+                        self._add_risk_alert(
+                            card, RiskType.COLOR_DIFFERENCE_CLUSTER,
+                            f"染缸批次 {batch} 色差问题集中，累计返调 {count} 次"
+                        )
+                result.append(HighReworkBatchStats(
+                    dye_vat_batch=batch,
+                    rework_count=count,
+                    affected_card_count=len(batch_card_count[batch])
+                ))
+        return result
+
+    def detect_team_high_rework_rate(self) -> List[Dict]:
+        team_stats: Dict[str, Dict] = defaultdict(lambda: {"total": 0, "reworked": 0})
+
+        for card in self.cards.values():
+            team_stats[card.responsible_team]["total"] += 1
+            if len(card.rework_records) > 0:
+                team_stats[card.responsible_team]["reworked"] += 1
+
+        result = []
+        for team, stats in team_stats.items():
+            if stats["total"] > 0:
+                rate = stats["reworked"] / stats["total"]
+                if rate >= TEAM_HIGH_REWORK_RATE_THRESHOLD:
+                    for card in self.cards.values():
+                        if card.responsible_team == team:
+                            self._add_risk_alert(
+                                card, RiskType.TEAM_HIGH_REWORK_RATE,
+                                f"小组 {team} 返调率 {rate:.1%}，超过阈值 {TEAM_HIGH_REWORK_RATE_THRESHOLD:.0%}"
+                            )
+                    result.append({
+                        "team": team,
+                        "total_cards": stats["total"],
+                        "reworked_cards": stats["reworked"],
+                        "rework_rate": rate
+                    })
+        return result
+
+    def get_high_rework_batches(self) -> List[HighReworkBatchStats]:
+        self.detect_color_difference_cluster()
+        batch_rework_count: Dict[str, int] = defaultdict(int)
+        batch_card_count: Dict[str, set] = defaultdict(set)
+
+        for card in self.cards.values():
+            for _ in card.rework_records:
+                for proofing in card.proofing_records:
+                    batch_rework_count[proofing.dye_vat_batch] += 1
+                    batch_card_count[proofing.dye_vat_batch].add(card.id)
+
+        result = []
+        for batch, count in batch_rework_count.items():
+            result.append(HighReworkBatchStats(
+                dye_vat_batch=batch,
+                rework_count=count,
+                affected_card_count=len(batch_card_count[batch])
+            ))
+        result.sort(key=lambda x: x.rework_count, reverse=True)
+        return result
+
+    def get_pending_inspection_stats(self) -> PendingInspectionStats:
+        pending_cards = [
+            card for card in self.cards.values()
+            if card.status == CardStatus.PENDING_INSPECTION
+        ]
+        overdue_count = 0
+        now = datetime.now()
+        for card in pending_cards:
+            if card.submitted_for_inspection_at:
+                overdue_time = card.submitted_for_inspection_at + timedelta(hours=INSPECTION_OVERDUE_HOURS)
+                if now > overdue_time:
+                    overdue_count += 1
+        return PendingInspectionStats(
+            pending_count=len(pending_cards),
+            overdue_count=overdue_count,
+            cards=pending_cards
+        )
+
+    def get_confirmation_cycle_stats(self) -> List[ConfirmationCycleStats]:
+        customer_stats: Dict[str, Dict] = defaultdict(lambda: {"total_days": 0, "count": 0})
+
+        for card in self.cards.values():
+            if card.status == CardStatus.CONFIRMED and card.confirmation_record:
+                cycle_days = (card.confirmation_record.created_at - card.created_at).total_seconds() / 86400
+                customer_stats[card.customer_code]["total_days"] += cycle_days
+                customer_stats[card.customer_code]["count"] += 1
+
+        result = []
+        for customer, stats in customer_stats.items():
+            if stats["count"] > 0:
+                result.append(ConfirmationCycleStats(
+                    customer_code=customer,
+                    avg_cycle_days=round(stats["total_days"] / stats["count"], 2),
+                    total_confirmed=stats["count"]
+                ))
+        return result
+
+    def get_all_cards_json(self) -> List[Dict]:
+        return [card.model_dump(mode='json') for card in self.cards.values()]
+
+    def resolve_risk_alert(self, card_id: str, alert_id: str) -> ColorCard:
+        card = self.get_card(card_id)
+        if not card:
+            raise ValueError(f"色卡 {card_id} 不存在")
+        for alert in card.risk_alerts:
+            if alert.id == alert_id:
+                alert.resolved = True
+                card.updated_at = datetime.now()
+                return card
+        raise ValueError(f"风险预警 {alert_id} 不存在")
+
+
+storage = MemoryStorage()
