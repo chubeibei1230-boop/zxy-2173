@@ -14,7 +14,9 @@ from models import (
     DashboardFilterParams, DashboardOverviewResponse, DashboardDetailResponse,
     ResampleApplication, ResampleApplicationCreate, ResampleStatus, ResamplePriority,
     ResampleAcceptSubmit, ResampleRejectSubmit, ResampleCompleteSubmit,
-    ResampleFilterParams, ResampleDashboardOverview
+    ResampleFilterParams, ResampleDashboardOverview,
+    ResampleProofingSubmit, ResampleInspectionSubmit,
+    ResampleReworkSubmit, ResampleConfirmationSubmit
 )
 from auth import authenticate_user, create_token_for_user, get_current_user
 from storage import storage
@@ -304,7 +306,8 @@ async def list_resample_applications(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000)
+    limit: int = Query(100, ge=1, le=1000),
+    current_user: User = Depends(get_current_user)
 ):
     filters = ResampleFilterParams(
         customer_code=customer_code,
@@ -322,7 +325,10 @@ async def list_resample_applications(
 
 
 @app.get("/resample/{app_id}", response_model=ResampleApplication)
-async def get_resample_application(app_id: str):
+async def get_resample_application(
+    app_id: str,
+    current_user: User = Depends(get_current_user)
+):
     app = storage.get_resample_application(app_id)
     if not app:
         raise HTTPException(status_code=404, detail=f"复样申请 {app_id} 不存在")
@@ -377,6 +383,66 @@ async def add_resample_follow_up(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.put("/resample/{app_id}/proofing/start", response_model=ResampleApplication)
+async def start_resample_proofing(
+    app_id: str,
+    submit: ResampleAcceptSubmit,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        return storage.start_resample_proofing(app_id, submit.operator)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/resample/{app_id}/proofing/complete", response_model=ResampleApplication)
+async def complete_resample_proofing(
+    app_id: str,
+    submit: ResampleProofingSubmit,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        return storage.complete_resample_proofing(app_id, submit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/resample/{app_id}/inspection", response_model=ResampleApplication)
+async def submit_resample_inspection(
+    app_id: str,
+    submit: ResampleInspectionSubmit,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        return storage.add_resample_inspection(app_id, submit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/resample/{app_id}/rework", response_model=ResampleApplication)
+async def submit_resample_rework(
+    app_id: str,
+    submit: ResampleReworkSubmit,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        return storage.add_resample_rework(app_id, submit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/resample/{app_id}/confirm", response_model=ResampleApplication)
+async def confirm_resample(
+    app_id: str,
+    submit: ResampleConfirmationSubmit,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        return storage.confirm_resample(app_id, submit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.get("/dashboard/resample/overview", response_model=ResampleDashboardOverview)
 async def get_resample_dashboard_overview(
     customer_code: Optional[str] = Query(None, description="客户编码"),
@@ -401,7 +467,7 @@ async def get_resample_dashboard_overview(
 
 
 @app.get("/export/json")
-async def export_json():
+async def export_json(current_user: User = Depends(get_current_user)):
     data = storage.get_full_export_data()
     return JSONResponse(
         content=data,
@@ -413,7 +479,7 @@ async def export_json():
 
 
 @app.get("/export/download")
-async def download_json_file():
+async def download_json_file(current_user: User = Depends(get_current_user)):
     data = storage.get_full_export_data()
     filename = "color_cards_full_export.json"
     with open(filename, "w", encoding="utf-8") as f:

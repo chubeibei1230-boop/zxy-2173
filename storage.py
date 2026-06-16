@@ -11,7 +11,10 @@ from models import (
     DashboardOverviewResponse, DashboardDetailResponse,
     ResampleApplication, ResampleApplicationCreate, ResampleStatus, ResamplePriority,
     ResampleActionRecord, ResampleActionType, ResampleFilterParams,
-    ResampleStatusSummary, ResampleDimensionStats, ResampleDashboardOverview
+    ResampleStatusSummary, ResampleDimensionStats, ResampleDashboardOverview,
+    ResampleProofingRecord, ResampleInspectionRecord, ResampleReworkRecord,
+    ResampleConfirmationRecord, ResampleProofingSubmit, ResampleInspectionSubmit,
+    ResampleReworkSubmit, ResampleConfirmationSubmit
 )
 from config import (
     REWORK_THRESHOLD, INSPECTION_OVERDUE_HOURS,
@@ -696,8 +699,8 @@ class MemoryStorage:
         application = self.get_resample_application(app_id)
         if not application:
             raise ValueError(f"复样申请 {app_id} 不存在")
-        if application.status not in [ResampleStatus.PROCESSING, ResampleStatus.PENDING]:
-            raise ValueError(f"当前状态 {application.status} 不允许添加跟进记录")
+        if application.status != ResampleStatus.PROCESSING:
+            raise ValueError(f"当前状态 {application.status} 不允许添加跟进记录，只能在受理后添加")
 
         action_record = ResampleActionRecord(
             id=str(uuid.uuid4()),
@@ -709,6 +712,154 @@ class MemoryStorage:
         application.updated_at = datetime.now()
 
         return application
+
+    def start_resample_proofing(self, app_id: str, operator: str) -> ResampleApplication:
+        application = self.get_resample_application(app_id)
+        if not application:
+            raise ValueError(f"复样申请 {app_id} 不存在")
+        if application.status != ResampleStatus.PROCESSING:
+            raise ValueError(f"当前申请状态 {application.status} 不允许开始打样")
+        if application.resample_status not in [CardStatus.PENDING_PROOFING, CardStatus.REWORKING]:
+            raise ValueError(f"当前复样状态 {application.resample_status} 不允许开始打样")
+
+        application.resample_status = CardStatus.PROOFING
+        application.updated_at = datetime.now()
+
+        action_record = ResampleActionRecord(
+            id=str(uuid.uuid4()),
+            action_type=ResampleActionType.PROOFING_START,
+            operator=operator,
+            remark="开始复样打样"
+        )
+        application.action_records.append(action_record)
+
+        return application
+
+    def complete_resample_proofing(self, app_id: str, submit: ResampleProofingSubmit) -> ResampleApplication:
+        application = self.get_resample_application(app_id)
+        if not application:
+            raise ValueError(f"复样申请 {app_id} 不存在")
+        if application.status != ResampleStatus.PROCESSING:
+            raise ValueError(f"当前申请状态 {application.status} 不允许完成打样")
+        if application.resample_status != CardStatus.PROOFING:
+            raise ValueError(f"当前复样状态 {application.resample_status} 不允许完成打样")
+
+        record = ResampleProofingRecord(
+            id=str(uuid.uuid4()),
+            dye_vat_batch=submit.dye_vat_batch,
+            proofing_process=submit.proofing_process
+        )
+        application.resample_proofing_records.append(record)
+        application.resample_status = CardStatus.PENDING_INSPECTION
+        application.resample_submitted_for_inspection_at = datetime.now()
+        application.updated_at = datetime.now()
+
+        action_record = ResampleActionRecord(
+            id=str(uuid.uuid4()),
+            action_type=ResampleActionType.PROOFING_COMPLETE,
+            operator=submit.operator,
+            remark=f"完成复样打样，染缸批次：{submit.dye_vat_batch}，工艺：{submit.proofing_process}"
+        )
+        application.action_records.append(action_record)
+
+        return application
+
+    def add_resample_inspection(self, app_id: str, submit: ResampleInspectionSubmit) -> ResampleApplication:
+        application = self.get_resample_application(app_id)
+        if not application:
+            raise ValueError(f"复样申请 {app_id} 不存在")
+        if application.status != ResampleStatus.PROCESSING:
+            raise ValueError(f"当前申请状态 {application.status} 不允许提交质检")
+        if application.resample_status != CardStatus.PENDING_INSPECTION:
+            raise ValueError(f"当前复样状态 {application.resample_status} 不允许提交质检")
+
+        record = ResampleInspectionRecord(
+            id=str(uuid.uuid4()),
+            color_comparison_result=submit.color_comparison_result,
+            color_difference_value=submit.color_difference_value,
+            inspector=submit.inspector,
+            conclusion=submit.conclusion
+        )
+        application.resample_inspection_records.append(record)
+        application.updated_at = datetime.now()
+
+        action_record = ResampleActionRecord(
+            id=str(uuid.uuid4()),
+            action_type=ResampleActionType.INSPECTION,
+            operator=submit.inspector,
+            remark=f"复样质检，结论：{submit.conclusion}，色差：{submit.color_comparison_result}"
+        )
+        application.action_records.append(action_record)
+
+        return application
+
+    def add_resample_rework(self, app_id: str, submit: ResampleReworkSubmit) -> ResampleApplication:
+        application = self.get_resample_application(app_id)
+        if not application:
+            raise ValueError(f"复样申请 {app_id} 不存在")
+        if application.status != ResampleStatus.PROCESSING:
+            raise ValueError(f"当前申请状态 {application.status} 不允许返调")
+        if application.resample_status != CardStatus.PENDING_INSPECTION:
+            raise ValueError(f"当前复样状态 {application.resample_status} 不允许返调")
+        if not self._has_valid_resample_inspection_after_last_proofing(application):
+            raise ValueError("返调前必须存在本次打样后的质检结论")
+
+        record = ResampleReworkRecord(
+            id=str(uuid.uuid4()),
+            rework_action=submit.rework_action,
+            reason=submit.reason,
+            operator=submit.operator
+        )
+        application.resample_rework_records.append(record)
+        application.resample_status = CardStatus.REWORKING
+        application.updated_at = datetime.now()
+
+        action_record = ResampleActionRecord(
+            id=str(uuid.uuid4()),
+            action_type=ResampleActionType.REWORK,
+            operator=submit.operator,
+            remark=f"复样返调，措施：{submit.rework_action}，原因：{submit.reason}"
+        )
+        application.action_records.append(action_record)
+
+        return application
+
+    def confirm_resample(self, app_id: str, submit: ResampleConfirmationSubmit) -> ResampleApplication:
+        application = self.get_resample_application(app_id)
+        if not application:
+            raise ValueError(f"复样申请 {app_id} 不存在")
+        if application.status != ResampleStatus.PROCESSING:
+            raise ValueError(f"当前申请状态 {application.status} 不允许确认")
+        if application.resample_status != CardStatus.PENDING_INSPECTION:
+            raise ValueError(f"当前复样状态 {application.resample_status} 不允许确认")
+        if not self._has_valid_resample_inspection_after_last_proofing(application):
+            raise ValueError("确认前必须存在本次打样后的质检结论")
+
+        record = ResampleConfirmationRecord(
+            id=str(uuid.uuid4()),
+            result=submit.result,
+            confirmer=submit.confirmer
+        )
+        application.resample_confirmation_record = record
+        application.resample_status = CardStatus.CONFIRMED
+        application.updated_at = datetime.now()
+
+        action_record = ResampleActionRecord(
+            id=str(uuid.uuid4()),
+            action_type=ResampleActionType.CONFIRM,
+            operator=submit.confirmer,
+            remark=f"复样确认，结果：{submit.result}"
+        )
+        application.action_records.append(action_record)
+
+        return application
+
+    def _has_valid_resample_inspection_after_last_proofing(self, application: ResampleApplication) -> bool:
+        if not application.resample_inspection_records or not application.resample_proofing_records:
+            return False
+        last_proofing_time = application.resample_proofing_records[-1].created_at
+        last_inspection_time = application.resample_inspection_records[-1].created_at
+        return last_inspection_time > last_proofing_time
 
     def get_resample_dashboard_overview(self, filters: Optional[ResampleFilterParams] = None) -> ResampleDashboardOverview:
         applications = list(self.resample_applications.values())

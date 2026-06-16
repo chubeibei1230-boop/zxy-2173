@@ -33,6 +33,11 @@ class ResampleActionType(str, Enum):
     REJECT = "驳回"
     COMPLETE = "完成"
     FOLLOW_UP = "跟进记录"
+    PROOFING_START = "复样打样开始"
+    PROOFING_COMPLETE = "复样打样完成"
+    INSPECTION = "复样质检"
+    REWORK = "复样返调"
+    CONFIRM = "复样确认"
 
 
 class RiskType(str, Enum):
@@ -274,6 +279,37 @@ class ResampleApplicationCreate(ResampleApplicationBase):
     pass
 
 
+class ResampleProofingRecord(BaseModel):
+    id: str
+    dye_vat_batch: str
+    proofing_process: str
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class ResampleInspectionRecord(BaseModel):
+    id: str
+    color_comparison_result: str
+    color_difference_value: Optional[float] = None
+    inspector: str
+    conclusion: str
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class ResampleReworkRecord(BaseModel):
+    id: str
+    rework_action: str
+    reason: str
+    operator: str
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class ResampleConfirmationRecord(BaseModel):
+    id: str
+    result: str
+    confirmer: str
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
 class ResampleApplication(ResampleApplicationBase):
     id: str
     status: ResampleStatus = ResampleStatus.PENDING
@@ -282,6 +318,12 @@ class ResampleApplication(ResampleApplicationBase):
     color_card_version: str
     responsible_team: str
     original_confirmation_record: Optional[ConfirmationRecord] = None
+    resample_status: CardStatus = CardStatus.PENDING_PROOFING
+    resample_proofing_records: List[ResampleProofingRecord] = Field(default_factory=list)
+    resample_inspection_records: List[ResampleInspectionRecord] = Field(default_factory=list)
+    resample_rework_records: List[ResampleReworkRecord] = Field(default_factory=list)
+    resample_confirmation_record: Optional[ResampleConfirmationRecord] = None
+    resample_submitted_for_inspection_at: Optional[datetime] = None
     action_records: List[ResampleActionRecord] = Field(default_factory=list)
     rejection_reason: Optional[str] = None
     completion_remark: Optional[str] = None
@@ -304,6 +346,30 @@ class ResampleRejectSubmit(BaseModel):
 class ResampleCompleteSubmit(BaseModel):
     operator: str
     remark: Optional[str] = None
+
+
+class ResampleProofingSubmit(BaseModel):
+    dye_vat_batch: str
+    proofing_process: str
+    operator: str
+
+
+class ResampleInspectionSubmit(BaseModel):
+    color_comparison_result: str
+    color_difference_value: Optional[float] = None
+    inspector: str
+    conclusion: str
+
+
+class ResampleReworkSubmit(BaseModel):
+    rework_action: str
+    reason: str
+    operator: str
+
+
+class ResampleConfirmationSubmit(BaseModel):
+    result: str
+    confirmer: str
 
 
 class ResampleFilterParams(BaseModel):

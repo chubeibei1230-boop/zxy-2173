@@ -168,8 +168,9 @@ def test_risks_detect():
     assert response.status_code == 200
     print("[OK] 风险检测测试通过")
 
-def test_export_json():
-    response = client.get("/export/json")
+def test_export_json(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get("/export/json", headers=headers)
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/json"
     print("[OK] JSON导出测试通过")
@@ -369,25 +370,30 @@ def test_create_resample_without_confirmed_card(token):
     print("[OK] 非确认状态色卡不能发起复样测试通过")
 
 
-def test_get_resample_application(app_id):
-    response = client.get(f"/resample/{app_id}")
+def test_get_resample_application(token, app_id):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get(f"/resample/{app_id}", headers=headers)
     assert response.status_code == 200
     assert response.json()["id"] == app_id
     assert "action_records" in response.json()
     assert "original_confirmation_record" in response.json()
+    assert "resample_status" in response.json()
+    assert "resample_proofing_records" in response.json()
     print("[OK] 获取复样申请详情测试通过")
 
 
-def test_list_resample_applications():
-    response = client.get("/resample")
+def test_list_resample_applications(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get("/resample", headers=headers)
     assert response.status_code == 200
     assert "items" in response.json()
     assert "total" in response.json()
     print("[OK] 复样申请列表测试通过")
 
 
-def test_filter_resample_applications():
-    response = client.get("/resample?status=待受理&priority=高")
+def test_filter_resample_applications(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get("/resample?status=待受理&priority=高", headers=headers)
     assert response.status_code == 200
     print("[OK] 复样申请筛选测试通过")
 
@@ -487,20 +493,274 @@ def test_complete_resample_application(token, app_id):
     print("[OK] 完成复样申请测试通过")
 
 
-def test_resample_follow_up(token, app_id):
+def test_follow_up_before_accept_rejected(token):
     headers = {"Authorization": f"Bearer {token}"}
+    response = client.post(
+        "/cards",
+        headers=headers,
+        json={
+            "customer_code": "C203",
+            "fabric_type": "羊毛",
+            "color_card_version": "V1",
+            "responsible_team": "A组"
+        }
+    )
+    card_id = response.json()["id"]
+    client.put(f"/cards/{card_id}/proofing/start", headers=headers)
+    client.put(
+        f"/cards/{card_id}/proofing/complete",
+        headers=headers,
+        json={"dye_vat_batch": "B203", "proofing_process": "低温染色"}
+    )
+    client.put(
+        f"/cards/{card_id}/inspection",
+        headers=headers,
+        json={
+            "color_comparison_result": "ΔE=0.2",
+            "color_difference_value": 0.2,
+            "inspector": "质检员",
+            "conclusion": "合格"
+        }
+    )
+    client.put(
+        f"/cards/{card_id}/confirm",
+        headers=headers,
+        json={"result": "通过", "confirmer": "客户"}
+    )
+    response = client.post(
+        "/resample",
+        headers=headers,
+        json={
+            "original_card_id": card_id,
+            "reason": "测试跟进限制",
+            "applicant": "测试员",
+            "expected_completion_date": "2025-02-01",
+            "customer_feedback": "测试",
+            "priority": "低"
+        }
+    )
+    pending_app_id = response.json()["id"]
+    
+    response = client.put(
+        f"/resample/{pending_app_id}/follow-up",
+        headers=headers,
+        json={
+            "operator": "跟单员",
+            "remark": "未受理就添加跟进"
+        }
+    )
+    assert response.status_code == 400
+    assert "只能在受理后添加" in response.json()["detail"]
+    print("[OK] 未受理不能添加跟进记录测试通过")
+
+
+def test_resample_full_workflow(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post(
+        "/cards",
+        headers=headers,
+        json={
+            "customer_code": "C300",
+            "fabric_type": "真丝",
+            "color_card_version": "V2",
+            "responsible_team": "B组"
+        }
+    )
+    card_id = response.json()["id"]
+    client.put(f"/cards/{card_id}/proofing/start", headers=headers)
+    client.put(
+        f"/cards/{card_id}/proofing/complete",
+        headers=headers,
+        json={"dye_vat_batch": "B300", "proofing_process": "活性染料染色"}
+    )
+    client.put(
+        f"/cards/{card_id}/inspection",
+        headers=headers,
+        json={
+            "color_comparison_result": "ΔE=0.3",
+            "color_difference_value": 0.3,
+            "inspector": "质检员A",
+            "conclusion": "合格"
+        }
+    )
+    client.put(
+        f"/cards/{card_id}/confirm",
+        headers=headers,
+        json={"result": "通过", "confirmer": "客户A"}
+    )
+    
+    response = client.post(
+        "/resample",
+        headers=headers,
+        json={
+            "original_card_id": card_id,
+            "reason": "客户反馈颜色偏深需调整",
+            "applicant": "业务员小王",
+            "expected_completion_date": "2025-03-01",
+            "customer_feedback": "客户希望颜色更浅一些，调整染色时间",
+            "priority": "紧急"
+        }
+    )
+    app_id = response.json()["id"]
+    assert response.json()["resample_status"] == "待打样"
+    
+    response = client.put(
+        f"/resample/{app_id}/accept",
+        headers=headers,
+        json={
+            "operator": "主管李经理",
+            "remark": "情况属实，同意复样"
+        }
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "处理中"
+    
+    response = client.put(
+        f"/resample/{app_id}/proofing/start",
+        headers=headers,
+        json={"operator": "打样员小张"}
+    )
+    assert response.status_code == 200
+    assert response.json()["resample_status"] == "打样中"
+    
+    response = client.put(
+        f"/resample/{app_id}/proofing/complete",
+        headers=headers,
+        json={
+            "dye_vat_batch": "B300-R1",
+            "proofing_process": "缩短染色时间30%",
+            "operator": "打样员小张"
+        }
+    )
+    assert response.status_code == 200
+    assert response.json()["resample_status"] == "待质检"
+    assert len(response.json()["resample_proofing_records"]) == 1
+    
+    response = client.put(
+        f"/resample/{app_id}/inspection",
+        headers=headers,
+        json={
+            "color_comparison_result": "ΔE=1.2",
+            "color_difference_value": 1.2,
+            "inspector": "质检员B",
+            "conclusion": "不合格"
+        }
+    )
+    assert response.status_code == 200
+    assert len(response.json()["resample_inspection_records"]) == 1
+    
+    response = client.put(
+        f"/resample/{app_id}/rework",
+        headers=headers,
+        json={
+            "rework_action": "继续减少染色时间",
+            "reason": "颜色仍偏深，需进一步调整",
+            "operator": "技术员小陈"
+        }
+    )
+    assert response.status_code == 200
+    assert response.json()["resample_status"] == "返调中"
+    assert len(response.json()["resample_rework_records"]) == 1
+    
+    response = client.put(
+        f"/resample/{app_id}/proofing/start",
+        headers=headers,
+        json={"operator": "打样员小张"}
+    )
+    assert response.status_code == 200
+    assert response.json()["resample_status"] == "打样中"
+    
+    response = client.put(
+        f"/resample/{app_id}/proofing/complete",
+        headers=headers,
+        json={
+            "dye_vat_batch": "B300-R2",
+            "proofing_process": "减少染色时间50%",
+            "operator": "打样员小张"
+        }
+    )
+    assert response.status_code == 200
+    
+    response = client.put(
+        f"/resample/{app_id}/inspection",
+        headers=headers,
+        json={
+            "color_comparison_result": "ΔE=0.4",
+            "color_difference_value": 0.4,
+            "inspector": "质检员B",
+            "conclusion": "合格"
+        }
+    )
+    assert response.status_code == 200
+    
     response = client.put(
         f"/resample/{app_id}/follow-up",
         headers=headers,
         json={
-            "operator": "跟单员",
-            "remark": "客户已确认复样结果"
+            "operator": "跟单员小刘",
+            "remark": "样品已寄送客户确认"
         }
     )
-    print(f"Response status: {response.status_code}")
-    print(f"Response body: {response.json()}")
     assert response.status_code == 200
-    print("[OK] 复样跟进记录测试通过")
+    
+    response = client.put(
+        f"/resample/{app_id}/confirm",
+        headers=headers,
+        json={
+            "result": "通过",
+            "confirmer": "客户A"
+        }
+    )
+    assert response.status_code == 200
+    assert response.json()["resample_status"] == "已确认"
+    assert response.json()["resample_confirmation_record"] is not None
+    
+    action_types = [r["action_type"] for r in response.json()["action_records"]]
+    assert "提交申请" in action_types
+    assert "受理" in action_types
+    assert "复样打样开始" in action_types
+    assert "复样打样完成" in action_types
+    assert "复样质检" in action_types
+    assert "复样返调" in action_types
+    assert "跟进记录" in action_types
+    assert "复样确认" in action_types
+    
+    original_card = client.get(f"/cards/{card_id}", headers=headers).json()
+    assert original_card["status"] == "已确认"
+    assert len(original_card["proofing_records"]) == 1
+    
+    print("[OK] 完整复样执行流程测试通过")
+
+
+def test_resample_list_unauthorized():
+    response = client.get("/resample")
+    assert response.status_code == 401
+    print("[OK] 复样申请列表未授权访问校验测试通过")
+
+
+def test_resample_detail_unauthorized():
+    response = client.get("/resample/test-id")
+    assert response.status_code == 401
+    print("[OK] 复样申请详情未授权访问校验测试通过")
+
+
+def test_export_unauthorized():
+    response = client.get("/export/json")
+    assert response.status_code == 401
+    response = client.get("/export/download")
+    assert response.status_code == 401
+    print("[OK] 导出数据未授权访问校验测试通过")
+
+
+def test_resample_export_contains_data(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get("/export/json", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert "color_cards" in data
+    assert "resample_applications" in data
+    assert isinstance(data["resample_applications"], list)
+    print("[OK] 导出数据包含复样申请测试通过")
 
 
 def test_resample_dashboard_overview(token):
@@ -528,16 +788,6 @@ def test_resample_dashboard_filter(token):
     )
     assert response.status_code == 200
     print("[OK] 复样看板筛选测试通过")
-
-
-def test_resample_export_contains_data():
-    response = client.get("/export/json")
-    assert response.status_code == 200
-    data = response.json()
-    assert "color_cards" in data
-    assert "resample_applications" in data
-    assert isinstance(data["resample_applications"], list)
-    print("[OK] 导出数据包含复样申请测试通过")
 
 
 def test_resample_unauthorized():
@@ -577,7 +827,7 @@ def run_all_tests():
         test_stats_pending()
         test_stats_cycle()
         test_risks_detect()
-        test_export_json()
+        test_export_json(token)
         test_dashboard_unauthorized()
         test_dashboard_overview(token)
         test_dashboard_detail(token)
@@ -594,17 +844,22 @@ def run_all_tests():
         print("-" * 60)
         
         test_resample_unauthorized()
+        test_resample_list_unauthorized()
+        test_resample_detail_unauthorized()
+        test_export_unauthorized()
         test_create_resample_without_confirmed_card(token)
         app_id = test_create_resample_application(token, card_id)
-        test_get_resample_application(app_id)
-        test_list_resample_applications()
-        test_filter_resample_applications()
+        test_get_resample_application(token, app_id)
+        test_list_resample_applications(token)
+        test_filter_resample_applications(token)
+        test_follow_up_before_accept_rejected(token)
         test_accept_resample_application(token, app_id)
         test_reject_resample_application(token)
         test_complete_resample_application(token, app_id)
+        test_resample_full_workflow(token)
         test_resample_dashboard_overview(token)
         test_resample_dashboard_filter(token)
-        test_resample_export_contains_data()
+        test_resample_export_contains_data(token)
         
         print("=" * 60)
         print("[PASS] 所有API测试通过！")
