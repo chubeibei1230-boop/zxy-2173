@@ -488,9 +488,9 @@ def test_complete_resample_application(token, app_id):
             "remark": "复样完成，颜色已调整到位，符合客户要求"
         }
     )
-    assert response.status_code == 200
-    assert response.json()["status"] == "已完成"
-    print("[OK] 完成复样申请测试通过")
+    assert response.status_code == 400
+    assert "当前复样状态" in response.json()["detail"]
+    print("[OK] 未确认前不能完成复样测试通过")
 
 
 def test_follow_up_before_accept_rejected(token):
@@ -714,7 +714,18 @@ def test_resample_full_workflow(token):
     assert response.status_code == 200
     assert response.json()["resample_status"] == "已确认"
     assert response.json()["resample_confirmation_record"] is not None
-    
+
+    response = client.put(
+        f"/resample/{app_id}/complete",
+        headers=headers,
+        json={
+            "operator": "技术员钱七",
+            "remark": "复样完成，颜色已调整到位，符合客户要求"
+        }
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "已完成"
+
     action_types = [r["action_type"] for r in response.json()["action_records"]]
     assert "提交申请" in action_types
     assert "受理" in action_types

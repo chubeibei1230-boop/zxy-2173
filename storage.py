@@ -680,6 +680,8 @@ class MemoryStorage:
             raise ValueError(f"复样申请 {app_id} 不存在")
         if application.status != ResampleStatus.PROCESSING:
             raise ValueError(f"当前状态 {application.status} 不允许完成")
+        if application.resample_status != CardStatus.CONFIRMED:
+            raise ValueError(f"当前复样状态 {application.resample_status} 不允许完成")
 
         application.status = ResampleStatus.COMPLETED
         application.completion_remark = remark
