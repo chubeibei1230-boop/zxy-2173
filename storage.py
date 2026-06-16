@@ -6,7 +6,9 @@ from collections import defaultdict
 from models import (
     ColorCard, ColorCardCreate, CardStatus, RiskAlert, RiskType,
     ProofingRecord, InspectionRecord, ReworkRecord, ConfirmationRecord,
-    FilterParams, HighReworkBatchStats, PendingInspectionStats, ConfirmationCycleStats
+    FilterParams, HighReworkBatchStats, PendingInspectionStats, ConfirmationCycleStats,
+    DashboardFilterParams, StatusSummary, DimensionStats, CardDetailItem,
+    DashboardOverviewResponse, DashboardDetailResponse
 )
 from config import (
     REWORK_THRESHOLD, INSPECTION_OVERDUE_HOURS,
@@ -375,6 +377,163 @@ class MemoryStorage:
                 card.updated_at = datetime.now()
                 return card
         raise ValueError(f"风险预警 {alert_id} 不存在")
+
+    def _filter_cards_by_dashboard_params(self, filters: DashboardFilterParams) -> List[ColorCard]:
+        result = list(self.cards.values())
+
+        if filters.customer_code:
+            result = [c for c in result if c.customer_code == filters.customer_code]
+        if filters.fabric_type:
+            result = [c for c in result if c.fabric_type == filters.fabric_type]
+        if filters.responsible_team:
+            result = [c for c in result if c.responsible_team == filters.responsible_team]
+        if filters.status:
+            result = [c for c in result if c.status == filters.status]
+        if filters.start_date:
+            start_dt = datetime.combine(filters.start_date, datetime.min.time())
+            result = [c for c in result if c.created_at >= start_dt]
+        if filters.end_date:
+            end_dt = datetime.combine(filters.end_date, datetime.max.time())
+            result = [c for c in result if c.created_at <= end_dt]
+
+        return result
+
+    def _calculate_status_summary(self, cards: List[ColorCard]) -> StatusSummary:
+        summary = StatusSummary()
+        for card in cards:
+            summary.total_count += 1
+            if card.status == CardStatus.PENDING_PROOFING:
+                summary.pending_proofing_count += 1
+            elif card.status == CardStatus.PROOFING:
+                summary.proofing_count += 1
+            elif card.status == CardStatus.PENDING_INSPECTION:
+                summary.pending_inspection_count += 1
+            elif card.status == CardStatus.REWORKING:
+                summary.reworking_count += 1
+            elif card.status == CardStatus.CONFIRMED:
+                summary.confirmed_count += 1
+            elif card.status == CardStatus.DISCARDED:
+                summary.discarded_count += 1
+        return summary
+
+    def _calculate_dimension_stats(self, cards: List[ColorCard], dimension_field: str) -> List[DimensionStats]:
+        stats_map: Dict[str, Dict] = defaultdict(lambda: {
+            "total_cards": 0,
+            "total_cycle_days": 0.0,
+            "confirmed_count": 0,
+            "total_rework_count": 0,
+            "overdue_inspection_count": 0,
+            "unresolved_risk_count": 0
+        })
+
+        now = datetime.now()
+        for card in cards:
+            key = getattr(card, dimension_field)
+            stats = stats_map[key]
+            stats["total_cards"] += 1
+            stats["total_rework_count"] += len(card.rework_records)
+
+            if card.status == CardStatus.CONFIRMED and card.confirmation_record:
+                cycle_days = (card.confirmation_record.created_at - card.created_at).total_seconds() / 86400
+                stats["total_cycle_days"] += cycle_days
+                stats["confirmed_count"] += 1
+
+            if card.status == CardStatus.PENDING_INSPECTION and card.submitted_for_inspection_at:
+                overdue_time = card.submitted_for_inspection_at + timedelta(hours=INSPECTION_OVERDUE_HOURS)
+                if now > overdue_time:
+                    stats["overdue_inspection_count"] += 1
+
+            unresolved_risks = [a for a in card.risk_alerts if not a.resolved]
+            if unresolved_risks:
+                stats["unresolved_risk_count"] += 1
+
+        result = []
+        for key, stats in stats_map.items():
+            avg_cycle = stats["total_cycle_days"] / stats["confirmed_count"] if stats["confirmed_count"] > 0 else 0.0
+            result.append(DimensionStats(
+                dimension_key=key,
+                avg_confirmation_cycle_days=round(avg_cycle, 2),
+                total_rework_count=stats["total_rework_count"],
+                overdue_inspection_count=stats["overdue_inspection_count"],
+                unresolved_risk_count=stats["unresolved_risk_count"],
+                total_cards=stats["total_cards"]
+            ))
+        return result
+
+    def _get_next_suggested_action(self, card: ColorCard) -> str:
+        if card.status == CardStatus.PENDING_PROOFING:
+            return "请安排打样"
+        elif card.status == CardStatus.PROOFING:
+            return "请完成打样并提交质检"
+        elif card.status == CardStatus.PENDING_INSPECTION:
+            return "请进行质检"
+        elif card.status == CardStatus.REWORKING:
+            return "请安排返调后重新打样"
+        elif card.status == CardStatus.CONFIRMED:
+            return "色卡已确认，可安排生产"
+        elif card.status == CardStatus.DISCARDED:
+            return "色卡已废弃"
+        return "请跟进处理"
+
+    def _get_risk_info(self, card: ColorCard) -> Tuple[str, str]:
+        unresolved_risks = [a for a in card.risk_alerts if not a.resolved]
+        if not unresolved_risks:
+            return "正常", "none"
+
+        highest_level = "warning"
+        risk_types = []
+        for risk in unresolved_risks:
+            risk_types.append(risk.type.value)
+            if risk.level == "danger":
+                highest_level = "danger"
+
+        return "、".join(risk_types), highest_level
+
+    def _build_card_detail_item(self, card: ColorCard) -> CardDetailItem:
+        last_proofing = card.proofing_records[-1] if card.proofing_records else None
+        last_inspection = card.inspection_records[-1] if card.inspection_records else None
+        risk_status, risk_level = self._get_risk_info(card)
+
+        return CardDetailItem(
+            card_id=card.id,
+            customer_code=card.customer_code,
+            fabric_type=card.fabric_type,
+            color_card_version=card.color_card_version,
+            responsible_team=card.responsible_team,
+            current_status=card.status,
+            last_proofing_record=last_proofing,
+            last_inspection_conclusion=last_inspection.conclusion if last_inspection else None,
+            current_risk_status=risk_status,
+            risk_level=risk_level,
+            next_suggested_action=self._get_next_suggested_action(card),
+            created_at=card.created_at,
+            updated_at=card.updated_at
+        )
+
+    def get_dashboard_overview(self, filters: DashboardFilterParams) -> DashboardOverviewResponse:
+        cards = self._filter_cards_by_dashboard_params(filters)
+        status_summary = self._calculate_status_summary(cards)
+        customer_stats = self._calculate_dimension_stats(cards, "customer_code")
+        team_stats = self._calculate_dimension_stats(cards, "responsible_team")
+
+        return DashboardOverviewResponse(
+            filter_params=filters,
+            status_summary=status_summary,
+            customer_dimension_stats=customer_stats,
+            team_dimension_stats=team_stats
+        )
+
+    def get_dashboard_detail(self, filters: DashboardFilterParams, skip: int = 0, limit: int = 100) -> DashboardDetailResponse:
+        cards = self._filter_cards_by_dashboard_params(filters)
+        total = len(cards)
+        cards = cards[skip:skip + limit]
+        items = [self._build_card_detail_item(card) for card in cards]
+
+        return DashboardDetailResponse(
+            filter_params=filters,
+            total=total,
+            items=items
+        )
 
 
 storage = MemoryStorage()

@@ -10,7 +10,8 @@ from models import (
     ColorCard, ColorCardCreate, CardStatus, FilterParams,
     ProofingSubmit, InspectionSubmit, ReworkSubmit,
     ConfirmationSubmit, DiscardSubmit, Token, User,
-    HighReworkBatchStats, PendingInspectionStats, ConfirmationCycleStats
+    HighReworkBatchStats, PendingInspectionStats, ConfirmationCycleStats,
+    DashboardFilterParams, DashboardOverviewResponse, DashboardDetailResponse
 )
 from auth import authenticate_user, create_token_for_user, get_current_user
 from storage import storage
@@ -192,6 +193,60 @@ async def get_pending_inspection_stats():
 @app.get("/stats/confirmation-cycle", response_model=List[ConfirmationCycleStats])
 async def get_confirmation_cycle_stats():
     return storage.get_confirmation_cycle_stats()
+
+
+@app.get("/dashboard/overview", response_model=DashboardOverviewResponse)
+async def get_dashboard_overview(
+    customer_code: Optional[str] = Query(None, description="客户编码"),
+    fabric_type: Optional[str] = Query(None, description="面料类型"),
+    responsible_team: Optional[str] = Query(None, description="负责人小组"),
+    status: Optional[CardStatus] = Query(None, description="当前状态"),
+    start_date: Optional[date] = Query(None, description="开始日期 (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        DashboardFilterParams.validate_date_range(start_date, end_date)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    filters = DashboardFilterParams(
+        customer_code=customer_code,
+        fabric_type=fabric_type,
+        responsible_team=responsible_team,
+        status=status,
+        start_date=start_date,
+        end_date=end_date
+    )
+    return storage.get_dashboard_overview(filters)
+
+
+@app.get("/dashboard/detail", response_model=DashboardDetailResponse)
+async def get_dashboard_detail(
+    customer_code: Optional[str] = Query(None, description="客户编码"),
+    fabric_type: Optional[str] = Query(None, description="面料类型"),
+    responsible_team: Optional[str] = Query(None, description="负责人小组"),
+    status: Optional[CardStatus] = Query(None, description="当前状态"),
+    start_date: Optional[date] = Query(None, description="开始日期 (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+    skip: int = Query(0, ge=0, description="跳过的记录数"),
+    limit: int = Query(100, ge=1, le=1000, description="返回的最大记录数"),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        DashboardFilterParams.validate_date_range(start_date, end_date)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    filters = DashboardFilterParams(
+        customer_code=customer_code,
+        fabric_type=fabric_type,
+        responsible_team=responsible_team,
+        status=status,
+        start_date=start_date,
+        end_date=end_date
+    )
+    return storage.get_dashboard_detail(filters, skip=skip, limit=limit)
 
 
 @app.get("/risks/color-difference-cluster")

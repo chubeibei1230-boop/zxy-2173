@@ -157,3 +157,65 @@ class ConfirmationCycleStats(BaseModel):
     customer_code: str
     avg_cycle_days: float
     total_confirmed: int
+
+
+class DashboardFilterParams(BaseModel):
+    customer_code: Optional[str] = None
+    fabric_type: Optional[str] = None
+    responsible_team: Optional[str] = None
+    status: Optional[CardStatus] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+
+    @classmethod
+    def validate_date_range(cls, start_date: Optional[date], end_date: Optional[date]):
+        if start_date and end_date and start_date > end_date:
+            raise ValueError("开始日期不能大于结束日期")
+
+
+class StatusSummary(BaseModel):
+    pending_proofing_count: int = 0
+    proofing_count: int = 0
+    pending_inspection_count: int = 0
+    reworking_count: int = 0
+    confirmed_count: int = 0
+    discarded_count: int = 0
+    total_count: int = 0
+
+
+class DimensionStats(BaseModel):
+    dimension_key: str
+    avg_confirmation_cycle_days: float = 0.0
+    total_rework_count: int = 0
+    overdue_inspection_count: int = 0
+    unresolved_risk_count: int = 0
+    total_cards: int = 0
+
+
+class CardDetailItem(BaseModel):
+    card_id: str
+    customer_code: str
+    fabric_type: str
+    color_card_version: str
+    responsible_team: str
+    current_status: CardStatus
+    last_proofing_record: Optional[ProofingRecord] = None
+    last_inspection_conclusion: Optional[str] = None
+    current_risk_status: str = "正常"
+    risk_level: str = "none"
+    next_suggested_action: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class DashboardOverviewResponse(BaseModel):
+    filter_params: DashboardFilterParams
+    status_summary: StatusSummary
+    customer_dimension_stats: List[DimensionStats]
+    team_dimension_stats: List[DimensionStats]
+
+
+class DashboardDetailResponse(BaseModel):
+    filter_params: DashboardFilterParams
+    total: int
+    items: List[CardDetailItem]

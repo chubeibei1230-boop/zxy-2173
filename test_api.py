@@ -74,7 +74,14 @@ def test_filter_cards():
 def test_proofing(token, card_id):
     headers = {"Authorization": f"Bearer {token}"}
     response = client.put(
-        f"/cards/{card_id}/proofing",
+        f"/cards/{card_id}/proofing/start",
+        headers=headers
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "打样中"
+    
+    response = client.put(
+        f"/cards/{card_id}/proofing/complete",
         headers=headers,
         json={
             "dye_vat_batch": "BATCH100",
@@ -114,7 +121,11 @@ def test_confirm_without_inspection(token):
     )
     card_id2 = response2.json()["id"]
     client.put(
-        f"/cards/{card_id2}/proofing",
+        f"/cards/{card_id2}/proofing/start",
+        headers=headers
+    )
+    client.put(
+        f"/cards/{card_id2}/proofing/complete",
         headers=headers,
         json={"dye_vat_batch": "BATCH101", "proofing_process": "低温染色"}
     )
@@ -163,6 +174,79 @@ def test_export_json():
     assert response.headers["content-type"] == "application/json"
     print("[OK] JSON导出测试通过")
 
+
+def test_dashboard_overview(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get("/dashboard/overview", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert "filter_params" in data
+    assert "status_summary" in data
+    assert "customer_dimension_stats" in data
+    assert "team_dimension_stats" in data
+    assert "total_count" in data["status_summary"]
+    print("[OK] 看板总览接口测试通过")
+
+
+def test_dashboard_detail(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get("/dashboard/detail", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert "filter_params" in data
+    assert "total" in data
+    assert "items" in data
+    if data["items"]:
+        item = data["items"][0]
+        assert "card_id" in item
+        assert "current_status" in item
+        assert "next_suggested_action" in item
+        assert "current_risk_status" in item
+    print("[OK] 看表明细接口测试通过")
+
+
+def test_dashboard_filter(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get(
+        "/dashboard/overview?customer_code=C001&responsible_team=A组",
+        headers=headers
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["filter_params"]["customer_code"] == "C001"
+    assert data["filter_params"]["responsible_team"] == "A组"
+    print("[OK] 看板筛选功能测试通过")
+
+
+def test_dashboard_date_validation(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get(
+        "/dashboard/overview?start_date=2025-01-01&end_date=2024-01-01",
+        headers=headers
+    )
+    assert response.status_code == 400
+    assert "开始日期不能大于结束日期" in response.json()["detail"]
+    print("[OK] 看板日期范围验证测试通过")
+
+
+def test_dashboard_unauthorized():
+    response = client.get("/dashboard/overview")
+    assert response.status_code == 401
+    print("[OK] 看板未授权访问校验测试通过")
+
+
+def test_dashboard_pagination(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get(
+        "/dashboard/detail?skip=0&limit=10",
+        headers=headers
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["items"]) <= 10
+    print("[OK] 看板分页功能测试通过")
+
+
 def test_unauthorized():
     response = client.post(
         "/cards",
@@ -199,6 +283,12 @@ def run_all_tests():
         test_stats_cycle()
         test_risks_detect()
         test_export_json()
+        test_dashboard_unauthorized()
+        test_dashboard_overview(token)
+        test_dashboard_detail(token)
+        test_dashboard_filter(token)
+        test_dashboard_date_validation(token)
+        test_dashboard_pagination(token)
         
         print("=" * 60)
         print("[PASS] 所有API测试通过！")
