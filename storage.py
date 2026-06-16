@@ -985,6 +985,11 @@ class MemoryStorage:
         )
 
     def _build_resample_snapshot(self, app: ResampleApplication) -> ResampleApplicationSnapshot:
+        original_card_snapshot = None
+        original_card = self.get_card(app.original_card_id)
+        if original_card:
+            original_card_snapshot = self._build_color_card_snapshot(original_card)
+
         return ResampleApplicationSnapshot(
             id=app.id,
             original_card_id=app.original_card_id,
@@ -999,6 +1004,7 @@ class MemoryStorage:
             color_card_version=app.color_card_version,
             responsible_team=app.responsible_team,
             original_confirmation_record=app.original_confirmation_record.model_copy() if app.original_confirmation_record else None,
+            original_card_snapshot=original_card_snapshot,
             resample_status=app.resample_status,
             resample_proofing_records=[pr.model_copy() for pr in app.resample_proofing_records],
             resample_inspection_records=[ir.model_copy() for ir in app.resample_inspection_records],
@@ -1053,6 +1059,9 @@ class MemoryStorage:
             fabric_type = app.fabric_type
             color_card_version = app.color_card_version
             responsible_team = app.responsible_team
+            original_card = self.get_card(app.original_card_id)
+            if original_card:
+                color_card_snapshot = self._build_color_card_snapshot(original_card)
             resample_snapshot = self._build_resample_snapshot(app)
 
         archive_id = str(uuid.uuid4())

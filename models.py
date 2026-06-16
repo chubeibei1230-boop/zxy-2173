@@ -1,7 +1,7 @@
 from enum import Enum
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 
 class CardStatus(str, Enum):
@@ -443,6 +443,7 @@ class ResampleApplicationSnapshot(BaseModel):
     color_card_version: str
     responsible_team: str
     original_confirmation_record: Optional[ConfirmationRecord] = None
+    original_card_snapshot: Optional[ColorCardSnapshot] = None
     resample_status: CardStatus
     resample_proofing_records: List[ResampleProofingRecord] = Field(default_factory=list)
     resample_inspection_records: List[ResampleInspectionRecord] = Field(default_factory=list)
@@ -461,10 +462,21 @@ class DeliveryArchiveBase(BaseModel):
 
 
 class DeliveryArchiveCreate(DeliveryArchiveBase):
-    delivery_batch_no: str
-    delivery_target: str
+    delivery_batch_no: str = Field(..., min_length=1, description="交付批次号不能为空")
+    delivery_target: str = Field(..., min_length=1, description="交付对象不能为空")
     delivery_remark: Optional[str] = None
-    archivist: str
+    archivist: str = Field(..., min_length=1, description="归档人不能为空")
+
+    @model_validator(mode="after")
+    def validate_non_empty_fields(self):
+        def _strip_check(value: str, field_name: str) -> str:
+            if value is not None and value.strip() == "":
+                raise ValueError(f"{field_name}不能为空")
+            return value
+        self.delivery_batch_no = _strip_check(self.delivery_batch_no, "交付批次号")
+        self.delivery_target = _strip_check(self.delivery_target, "交付对象")
+        self.archivist = _strip_check(self.archivist, "归档人")
+        return self
 
 
 class DeliveryArchive(BaseModel):

@@ -1,8 +1,291 @@
 import sys
+import pytest
 from fastapi.testclient import TestClient
 from main import app
+from storage import storage
 
 client = TestClient(app)
+
+
+@pytest.fixture(scope="session")
+def token():
+    response = client.post(
+        "/token",
+        data={"username": "admin", "password": "admin123"}
+    )
+    assert response.status_code == 200
+    return response.json()["access_token"]
+
+
+@pytest.fixture(scope="session")
+def sample_confirmed_card(token):
+    import uuid as _uid
+    suffix = _uid.uuid4().hex[:8]
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post(
+        "/cards",
+        headers=headers,
+        json={
+            "customer_code": f"FIXTURE-CUST-{suffix}",
+            "fabric_type": f"FIXTURE-FAB-{suffix}",
+            "color_card_version": "V1",
+            "responsible_team": "A组"
+        }
+    )
+    card_id = response.json()["id"]
+    client.put(f"/cards/{card_id}/proofing/start", headers=headers)
+    client.put(
+        f"/cards/{card_id}/proofing/complete",
+        headers=headers,
+        json={"dye_vat_batch": f"BATCH-{suffix}", "proofing_process": "测试染色"}
+    )
+    client.put(
+        f"/cards/{card_id}/inspection",
+        headers=headers,
+        json={
+            "color_comparison_result": "ΔE=0.4",
+            "color_difference_value": 0.4,
+            "inspector": "质检员A",
+            "conclusion": "合格"
+        }
+    )
+    client.put(
+        f"/cards/{card_id}/confirm",
+        headers=headers,
+        json={"result": "通过", "confirmer": "客户测试员"}
+    )
+    return card_id
+
+
+@pytest.fixture(scope="session")
+def sample_completed_resample(token, sample_confirmed_card):
+    import uuid as _uid
+    suffix = _uid.uuid4().hex[:8]
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post(
+        "/resample",
+        headers=headers,
+        json={
+            "original_card_id": sample_confirmed_card,
+            "reason": f"测试复样-{suffix}",
+            "applicant": "测试业务员",
+            "expected_completion_date": "2025-06-30",
+            "customer_feedback": "客户反馈",
+            "priority": "中"
+        }
+    )
+    app_id = response.json()["id"]
+    client.put(f"/resample/{app_id}/accept", headers=headers,
+               json={"operator": "测试主管", "remark": "同意"})
+    client.put(f"/resample/{app_id}/proofing/start", headers=headers,
+               json={"operator": "测试打样员"})
+    client.put(
+        f"/resample/{app_id}/proofing/complete",
+        headers=headers,
+        json={"dye_vat_batch": f"BATCH-R-{suffix}", "proofing_process": "复样染色", "operator": "测试打样员"}
+    )
+    client.put(
+        f"/resample/{app_id}/inspection",
+        headers=headers,
+        json={
+            "color_comparison_result": "ΔE=0.4",
+            "color_difference_value": 0.4,
+            "inspector": "测试质检员",
+            "conclusion": "合格"
+        }
+    )
+    client.put(
+        f"/resample/{app_id}/confirm",
+        headers=headers,
+        json={"result": "通过", "confirmer": "测试客户"}
+    )
+    client.put(
+        f"/resample/{app_id}/complete",
+        headers=headers,
+        json={"operator": "测试技术员", "remark": "完成"}
+    )
+    return app_id
+
+
+@pytest.fixture(scope="session")
+def card_id(token):
+    import uuid as _uid
+    suffix = _uid.uuid4().hex[:8]
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post(
+        "/cards",
+        headers=headers,
+        json={
+            "customer_code": f"PYTEST-CUST-{suffix}",
+            "fabric_type": f"PYTEST-FAB-{suffix}",
+            "color_card_version": "V1",
+            "responsible_team": "C组"
+        }
+    )
+    return response.json()["id"]
+
+
+@pytest.fixture(scope="session")
+def app_id(token, card_id):
+    import uuid as _uid
+    suffix = _uid.uuid4().hex[:8]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    _card_detail = client.get(f"/cards/{card_id}").json()
+    if _card_detail["status"] != "已确认":
+        client.put(f"/cards/{card_id}/proofing/start", headers=headers)
+        client.put(
+            f"/cards/{card_id}/proofing/complete",
+            headers=headers,
+            json={"dye_vat_batch": f"BATCH-FIX-{suffix}", "proofing_process": "fix染色"}
+        )
+        client.put(
+            f"/cards/{card_id}/inspection",
+            headers=headers,
+            json={"color_comparison_result": "ΔE=0.4", "color_difference_value": 0.4,
+                  "inspector": "质检员A", "conclusion": "合格"}
+        )
+        client.put(
+            f"/cards/{card_id}/confirm",
+            headers=headers,
+            json={"result": "通过", "confirmer": "fix客户"}
+        )
+
+    response = client.post(
+        "/resample",
+        headers=headers,
+        json={
+            "original_card_id": card_id,
+            "reason": f"pytest fixture 复样-{suffix}",
+            "applicant": "pytest业务员",
+            "expected_completion_date": "2025-06-30",
+            "customer_feedback": "pytest反馈",
+            "priority": "中"
+        }
+    )
+    return response.json()["id"]
+
+
+@pytest.fixture(scope="session")
+def resample_app_id(token, sample_confirmed_card):
+    return sample_completed_resample.__wrapped__ if hasattr(sample_completed_resample, "__wrapped__") else None
+
+
+def test_archive_empty_delivery_batch_no(token, sample_confirmed_card):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post(
+        "/archives",
+        headers=headers,
+        json={
+            "source_type": "原色卡",
+            "source_id": sample_confirmed_card,
+            "delivery_batch_no": "",
+            "delivery_target": "测试客户",
+            "archivist": "测试归档人"
+        }
+    )
+    assert response.status_code == 422
+    print("[OK] 交付批次号为空校验测试通过")
+
+
+def test_archive_whitespace_delivery_batch_no(token, sample_confirmed_card):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post(
+        "/archives",
+        headers=headers,
+        json={
+            "source_type": "原色卡",
+            "source_id": sample_confirmed_card,
+            "delivery_batch_no": "   ",
+            "delivery_target": "测试客户",
+            "archivist": "测试归档人"
+        }
+    )
+    assert response.status_code == 422
+    print("[OK] 交付批次号全空格校验测试通过")
+
+
+def test_archive_empty_delivery_target(token, sample_confirmed_card):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post(
+        "/archives",
+        headers=headers,
+        json={
+            "source_type": "原色卡",
+            "source_id": sample_confirmed_card,
+            "delivery_batch_no": "VALID-BATCH-001",
+            "delivery_target": "",
+            "archivist": "测试归档人"
+        }
+    )
+    assert response.status_code == 422
+    print("[OK] 交付对象为空校验测试通过")
+
+
+def test_archive_empty_archivist(token, sample_confirmed_card):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post(
+        "/archives",
+        headers=headers,
+        json={
+            "source_type": "原色卡",
+            "source_id": sample_confirmed_card,
+            "delivery_batch_no": "VALID-BATCH-002",
+            "delivery_target": "测试客户",
+            "archivist": ""
+        }
+    )
+    assert response.status_code == 422
+    print("[OK] 归档人为空校验测试通过")
+
+
+def test_resample_archive_contains_original_card_snapshot(token, sample_completed_resample):
+    headers = {"Authorization": f"Bearer {token}"}
+    import uuid as _uid
+    suffix = _uid.uuid4().hex[:8]
+    response = client.post(
+        "/archives",
+        headers=headers,
+        json={
+            "source_type": "复样申请",
+            "source_id": sample_completed_resample,
+            "delivery_batch_no": f"SNAPSHOT-TEST-{suffix}",
+            "delivery_target": "快照测试客户",
+            "delivery_remark": "测试复样归档是否包含原色卡快照",
+            "archivist": "快照测试员"
+        }
+    )
+    assert response.status_code == 200, f"归档失败: {response.status_code} {response.text}"
+    archive_id = response.json()["id"]
+
+    detail_response = client.get(f"/archives/{archive_id}", headers=headers)
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+
+    assert detail["color_card_snapshot"] is not None, "复样归档记录应包含 color_card_snapshot"
+    oc_snapshot = detail["color_card_snapshot"]
+    assert oc_snapshot["id"] is not None
+    assert "proofing_records" in oc_snapshot
+    assert "inspection_records" in oc_snapshot
+    assert "rework_records" in oc_snapshot
+    assert "risk_alerts" in oc_snapshot
+    assert "confirmation_record" in oc_snapshot
+    assert len(oc_snapshot["proofing_records"]) >= 1
+    assert len(oc_snapshot["inspection_records"]) >= 1
+    assert oc_snapshot["confirmation_record"] is not None
+
+    assert detail["resample_snapshot"] is not None
+    rs_snapshot = detail["resample_snapshot"]
+    assert rs_snapshot["original_card_snapshot"] is not None, "复样快照中应包含 original_card_snapshot"
+    inner_oc = rs_snapshot["original_card_snapshot"]
+    assert inner_oc["id"] == oc_snapshot["id"]
+    assert "proofing_records" in inner_oc
+    assert "inspection_records" in inner_oc
+    assert "rework_records" in inner_oc
+    assert "risk_alerts" in inner_oc
+
+    print("[OK] 复样归档包含原色卡完整快照测试通过")
+
 
 def test_root():
     response = client.get("/")
@@ -1478,12 +1761,60 @@ def run_all_tests():
         print("-" * 60)
         print("开始色卡交付归档模块测试")
         print("-" * 60)
+
+        import uuid as _uid
+        _fixture_suffix = _uid.uuid4().hex[:8]
+        _headers = {"Authorization": f"Bearer {token}"}
+        _resp = client.post("/cards", headers=_headers, json={
+            "customer_code": f"RUNALL-CUST-{_fixture_suffix}",
+            "fabric_type": f"RUNALL-FAB-{_fixture_suffix}",
+            "color_card_version": "V1",
+            "responsible_team": "A组"
+        })
+        _sample_card_id = _resp.json()["id"]
+        client.put(f"/cards/{_sample_card_id}/proofing/start", headers=_headers)
+        client.put(f"/cards/{_sample_card_id}/proofing/complete", headers=_headers,
+                   json={"dye_vat_batch": f"BATCH-RUN-{_fixture_suffix}", "proofing_process": "测试染色"})
+        client.put(f"/cards/{_sample_card_id}/inspection", headers=_headers,
+                   json={"color_comparison_result": "ΔE=0.4", "color_difference_value": 0.4,
+                         "inspector": "质检员A", "conclusion": "合格"})
+        client.put(f"/cards/{_sample_card_id}/confirm", headers=_headers,
+                   json={"result": "通过", "confirmer": "客户测试员"})
+
+        _resp = client.post("/resample", headers=_headers, json={
+            "original_card_id": _sample_card_id,
+            "reason": f"RUNALL 复样测试-{_fixture_suffix}",
+            "applicant": "测试业务员",
+            "expected_completion_date": "2025-06-30",
+            "customer_feedback": "客户反馈",
+            "priority": "中"
+        })
+        _sample_resample_id = _resp.json()["id"]
+        client.put(f"/resample/{_sample_resample_id}/accept", headers=_headers,
+                   json={"operator": "测试主管", "remark": "同意"})
+        client.put(f"/resample/{_sample_resample_id}/proofing/start", headers=_headers,
+                   json={"operator": "测试打样员"})
+        client.put(f"/resample/{_sample_resample_id}/proofing/complete", headers=_headers,
+                   json={"dye_vat_batch": f"BATCH-RUN-R-{_fixture_suffix}",
+                         "proofing_process": "复样染色", "operator": "测试打样员"})
+        client.put(f"/resample/{_sample_resample_id}/inspection", headers=_headers,
+                   json={"color_comparison_result": "ΔE=0.4", "color_difference_value": 0.4,
+                         "inspector": "测试质检员", "conclusion": "合格"})
+        client.put(f"/resample/{_sample_resample_id}/confirm", headers=_headers,
+                   json={"result": "通过", "confirmer": "测试客户"})
+        client.put(f"/resample/{_sample_resample_id}/complete", headers=_headers,
+                   json={"operator": "测试技术员", "remark": "完成"})
         
         test_archive_unauthorized()
+        test_archive_empty_delivery_batch_no(token, _sample_card_id)
+        test_archive_whitespace_delivery_batch_no(token, _sample_card_id)
+        test_archive_empty_delivery_target(token, _sample_card_id)
+        test_archive_empty_archivist(token, _sample_card_id)
         test_archive_unconfirmed_card(token)
         test_archive_uncompleted_resample(token)
         archive_id_1 = test_archive_confirmed_card(token)
         archive_id_2 = test_archive_completed_resample(token)
+        test_resample_archive_contains_original_card_snapshot(token, _sample_resample_id)
         test_archive_duplicate(token)
         test_get_archive_detail(token)
         test_list_archives(token)

@@ -1,10 +1,21 @@
 import sys
+import pytest
 from fastapi.testclient import TestClient
 from main import app
 from storage import storage
 from models import CardStatus
 
 client = TestClient(app)
+
+
+@pytest.fixture(scope="session")
+def fixes_token():
+    response = client.post(
+        "/token",
+        data={"username": "admin", "password": "admin123"}
+    )
+    return response.json()["access_token"]
+
 
 def get_token():
     response = client.post(
