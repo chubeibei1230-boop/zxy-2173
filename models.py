@@ -1,6 +1,6 @@
 from enum import Enum
 from datetime import datetime, date
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field, ConfigDict
 
 
@@ -11,6 +11,28 @@ class CardStatus(str, Enum):
     REWORKING = "返调中"
     CONFIRMED = "已确认"
     DISCARDED = "已废弃"
+
+
+class ResampleStatus(str, Enum):
+    PENDING = "待受理"
+    PROCESSING = "处理中"
+    COMPLETED = "已完成"
+    REJECTED = "已驳回"
+
+
+class ResamplePriority(str, Enum):
+    LOW = "低"
+    MEDIUM = "中"
+    HIGH = "高"
+    URGENT = "紧急"
+
+
+class ResampleActionType(str, Enum):
+    SUBMIT = "提交申请"
+    ACCEPT = "受理"
+    REJECT = "驳回"
+    COMPLETE = "完成"
+    FOLLOW_UP = "跟进记录"
 
 
 class RiskType(str, Enum):
@@ -229,3 +251,92 @@ class DashboardDetailResponse(BaseModel):
     filter_params: DashboardFilterParams
     total: int
     items: List[CardDetailItem]
+
+
+class ResampleActionRecord(BaseModel):
+    id: str
+    action_type: ResampleActionType
+    operator: str
+    remark: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class ResampleApplicationBase(BaseModel):
+    original_card_id: str
+    reason: str
+    applicant: str
+    expected_completion_date: date
+    customer_feedback: str
+    priority: ResamplePriority = ResamplePriority.MEDIUM
+
+
+class ResampleApplicationCreate(ResampleApplicationBase):
+    pass
+
+
+class ResampleApplication(ResampleApplicationBase):
+    id: str
+    status: ResampleStatus = ResampleStatus.PENDING
+    customer_code: str
+    fabric_type: str
+    color_card_version: str
+    responsible_team: str
+    original_confirmation_record: Optional[ConfirmationRecord] = None
+    action_records: List[ResampleActionRecord] = Field(default_factory=list)
+    rejection_reason: Optional[str] = None
+    completion_remark: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ResampleAcceptSubmit(BaseModel):
+    operator: str
+    remark: Optional[str] = None
+
+
+class ResampleRejectSubmit(BaseModel):
+    operator: str
+    reason: str
+
+
+class ResampleCompleteSubmit(BaseModel):
+    operator: str
+    remark: Optional[str] = None
+
+
+class ResampleFilterParams(BaseModel):
+    customer_code: Optional[str] = None
+    fabric_type: Optional[str] = None
+    responsible_team: Optional[str] = None
+    priority: Optional[ResamplePriority] = None
+    status: Optional[ResampleStatus] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    skip: int = 0
+    limit: int = 100
+
+
+class ResampleStatusSummary(BaseModel):
+    total_count: int = 0
+    pending_count: int = 0
+    processing_count: int = 0
+    completed_count: int = 0
+    rejected_count: int = 0
+
+
+class ResampleDimensionStats(BaseModel):
+    dimension_key: str
+    total_count: int = 0
+    pending_count: int = 0
+    processing_count: int = 0
+    completed_count: int = 0
+    rejected_count: int = 0
+
+
+class ResampleDashboardOverview(BaseModel):
+    status_summary: ResampleStatusSummary
+    customer_stats: List[ResampleDimensionStats]
+    team_stats: List[ResampleDimensionStats]
+    priority_stats: List[ResampleDimensionStats]

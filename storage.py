@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from collections import defaultdict
 
 from models import (
@@ -8,7 +8,10 @@ from models import (
     ProofingRecord, InspectionRecord, ReworkRecord, ConfirmationRecord,
     FilterParams, HighReworkBatchStats, PendingInspectionStats, ConfirmationCycleStats,
     DashboardFilterParams, StatusSummary, DimensionStats, CardDetailItem,
-    DashboardOverviewResponse, DashboardDetailResponse
+    DashboardOverviewResponse, DashboardDetailResponse,
+    ResampleApplication, ResampleApplicationCreate, ResampleStatus, ResamplePriority,
+    ResampleActionRecord, ResampleActionType, ResampleFilterParams,
+    ResampleStatusSummary, ResampleDimensionStats, ResampleDashboardOverview
 )
 from config import (
     REWORK_THRESHOLD, INSPECTION_OVERDUE_HOURS,
@@ -19,6 +22,7 @@ from config import (
 class MemoryStorage:
     def __init__(self):
         self.cards: Dict[str, ColorCard] = {}
+        self.resample_applications: Dict[str, ResampleApplication] = {}
         self._init_sample_data()
 
     def _init_sample_data(self):
@@ -569,6 +573,242 @@ class MemoryStorage:
             total=total,
             items=items
         )
+
+    def create_resample_application(self, app_create: ResampleApplicationCreate) -> ResampleApplication:
+        original_card = self.get_card(app_create.original_card_id)
+        if not original_card:
+            raise ValueError(f"原色卡 {app_create.original_card_id} 不存在")
+        if original_card.status != CardStatus.CONFIRMED:
+            raise ValueError(f"只有已确认的色卡才能发起复样申请，当前状态：{original_card.status}")
+
+        app_id = str(uuid.uuid4())
+        application = ResampleApplication(
+            id=app_id,
+            **app_create.model_dump(),
+            customer_code=original_card.customer_code,
+            fabric_type=original_card.fabric_type,
+            color_card_version=original_card.color_card_version,
+            responsible_team=original_card.responsible_team,
+            original_confirmation_record=original_card.confirmation_record
+        )
+
+        submit_record = ResampleActionRecord(
+            id=str(uuid.uuid4()),
+            action_type=ResampleActionType.SUBMIT,
+            operator=app_create.applicant,
+            remark="提交复样申请"
+        )
+        application.action_records.append(submit_record)
+
+        self.resample_applications[app_id] = application
+        return application
+
+    def get_resample_application(self, app_id: str) -> Optional[ResampleApplication]:
+        return self.resample_applications.get(app_id)
+
+    def list_resample_applications(self, filters: ResampleFilterParams) -> Tuple[List[ResampleApplication], int]:
+        result = list(self.resample_applications.values())
+
+        if filters.customer_code:
+            result = [a for a in result if a.customer_code == filters.customer_code]
+        if filters.fabric_type:
+            result = [a for a in result if a.fabric_type == filters.fabric_type]
+        if filters.responsible_team:
+            result = [a for a in result if a.responsible_team == filters.responsible_team]
+        if filters.priority:
+            result = [a for a in result if a.priority == filters.priority]
+        if filters.status:
+            result = [a for a in result if a.status == filters.status]
+        if filters.start_date:
+            start_dt = datetime.combine(filters.start_date, datetime.min.time())
+            result = [a for a in result if a.created_at >= start_dt]
+        if filters.end_date:
+            end_dt = datetime.combine(filters.end_date, datetime.max.time())
+            result = [a for a in result if a.created_at <= end_dt]
+
+        total = len(result)
+        result = result[filters.skip:filters.skip + filters.limit]
+        return result, total
+
+    def accept_resample_application(self, app_id: str, operator: str, remark: Optional[str] = None) -> ResampleApplication:
+        application = self.get_resample_application(app_id)
+        if not application:
+            raise ValueError(f"复样申请 {app_id} 不存在")
+        if application.status != ResampleStatus.PENDING:
+            raise ValueError(f"当前状态 {application.status} 不允许受理")
+
+        application.status = ResampleStatus.PROCESSING
+        application.updated_at = datetime.now()
+
+        action_record = ResampleActionRecord(
+            id=str(uuid.uuid4()),
+            action_type=ResampleActionType.ACCEPT,
+            operator=operator,
+            remark=remark or "受理复样申请"
+        )
+        application.action_records.append(action_record)
+
+        return application
+
+    def reject_resample_application(self, app_id: str, operator: str, reason: str) -> ResampleApplication:
+        application = self.get_resample_application(app_id)
+        if not application:
+            raise ValueError(f"复样申请 {app_id} 不存在")
+        if application.status != ResampleStatus.PENDING:
+            raise ValueError(f"当前状态 {application.status} 不允许驳回")
+
+        application.status = ResampleStatus.REJECTED
+        application.rejection_reason = reason
+        application.updated_at = datetime.now()
+
+        action_record = ResampleActionRecord(
+            id=str(uuid.uuid4()),
+            action_type=ResampleActionType.REJECT,
+            operator=operator,
+            remark=reason
+        )
+        application.action_records.append(action_record)
+
+        return application
+
+    def complete_resample_application(self, app_id: str, operator: str, remark: Optional[str] = None) -> ResampleApplication:
+        application = self.get_resample_application(app_id)
+        if not application:
+            raise ValueError(f"复样申请 {app_id} 不存在")
+        if application.status != ResampleStatus.PROCESSING:
+            raise ValueError(f"当前状态 {application.status} 不允许完成")
+
+        application.status = ResampleStatus.COMPLETED
+        application.completion_remark = remark
+        application.updated_at = datetime.now()
+
+        action_record = ResampleActionRecord(
+            id=str(uuid.uuid4()),
+            action_type=ResampleActionType.COMPLETE,
+            operator=operator,
+            remark=remark or "完成复样"
+        )
+        application.action_records.append(action_record)
+
+        return application
+
+    def add_resample_follow_up(self, app_id: str, operator: str, remark: str) -> ResampleApplication:
+        application = self.get_resample_application(app_id)
+        if not application:
+            raise ValueError(f"复样申请 {app_id} 不存在")
+        if application.status not in [ResampleStatus.PROCESSING, ResampleStatus.PENDING]:
+            raise ValueError(f"当前状态 {application.status} 不允许添加跟进记录")
+
+        action_record = ResampleActionRecord(
+            id=str(uuid.uuid4()),
+            action_type=ResampleActionType.FOLLOW_UP,
+            operator=operator,
+            remark=remark
+        )
+        application.action_records.append(action_record)
+        application.updated_at = datetime.now()
+
+        return application
+
+    def get_resample_dashboard_overview(self, filters: Optional[ResampleFilterParams] = None) -> ResampleDashboardOverview:
+        applications = list(self.resample_applications.values())
+
+        if filters:
+            if filters.customer_code:
+                applications = [a for a in applications if a.customer_code == filters.customer_code]
+            if filters.fabric_type:
+                applications = [a for a in applications if a.fabric_type == filters.fabric_type]
+            if filters.responsible_team:
+                applications = [a for a in applications if a.responsible_team == filters.responsible_team]
+            if filters.priority:
+                applications = [a for a in applications if a.priority == filters.priority]
+            if filters.status:
+                applications = [a for a in applications if a.status == filters.status]
+            if filters.start_date:
+                start_dt = datetime.combine(filters.start_date, datetime.min.time())
+                applications = [a for a in applications if a.created_at >= start_dt]
+            if filters.end_date:
+                end_dt = datetime.combine(filters.end_date, datetime.max.time())
+                applications = [a for a in applications if a.created_at <= end_dt]
+
+        status_summary = ResampleStatusSummary()
+        for app in applications:
+            status_summary.total_count += 1
+            if app.status == ResampleStatus.PENDING:
+                status_summary.pending_count += 1
+            elif app.status == ResampleStatus.PROCESSING:
+                status_summary.processing_count += 1
+            elif app.status == ResampleStatus.COMPLETED:
+                status_summary.completed_count += 1
+            elif app.status == ResampleStatus.REJECTED:
+                status_summary.rejected_count += 1
+
+        customer_stats_map: Dict[str, ResampleDimensionStats] = defaultdict(
+            lambda: ResampleDimensionStats(dimension_key="")
+        )
+        for app in applications:
+            stat = customer_stats_map[app.customer_code]
+            stat.dimension_key = app.customer_code
+            stat.total_count += 1
+            if app.status == ResampleStatus.PENDING:
+                stat.pending_count += 1
+            elif app.status == ResampleStatus.PROCESSING:
+                stat.processing_count += 1
+            elif app.status == ResampleStatus.COMPLETED:
+                stat.completed_count += 1
+            elif app.status == ResampleStatus.REJECTED:
+                stat.rejected_count += 1
+        customer_stats = list(customer_stats_map.values())
+
+        team_stats_map: Dict[str, ResampleDimensionStats] = defaultdict(
+            lambda: ResampleDimensionStats(dimension_key="")
+        )
+        for app in applications:
+            stat = team_stats_map[app.responsible_team]
+            stat.dimension_key = app.responsible_team
+            stat.total_count += 1
+            if app.status == ResampleStatus.PENDING:
+                stat.pending_count += 1
+            elif app.status == ResampleStatus.PROCESSING:
+                stat.processing_count += 1
+            elif app.status == ResampleStatus.COMPLETED:
+                stat.completed_count += 1
+            elif app.status == ResampleStatus.REJECTED:
+                stat.rejected_count += 1
+        team_stats = list(team_stats_map.values())
+
+        priority_stats_map: Dict[str, ResampleDimensionStats] = defaultdict(
+            lambda: ResampleDimensionStats(dimension_key="")
+        )
+        for app in applications:
+            stat = priority_stats_map[app.priority]
+            stat.dimension_key = app.priority
+            stat.total_count += 1
+            if app.status == ResampleStatus.PENDING:
+                stat.pending_count += 1
+            elif app.status == ResampleStatus.PROCESSING:
+                stat.processing_count += 1
+            elif app.status == ResampleStatus.COMPLETED:
+                stat.completed_count += 1
+            elif app.status == ResampleStatus.REJECTED:
+                stat.rejected_count += 1
+        priority_stats = list(priority_stats_map.values())
+
+        return ResampleDashboardOverview(
+            status_summary=status_summary,
+            customer_stats=customer_stats,
+            team_stats=team_stats,
+            priority_stats=priority_stats
+        )
+
+    def get_all_resample_applications_json(self) -> List[Dict]:
+        return [app.model_dump(mode='json') for app in self.resample_applications.values()]
+
+    def get_full_export_data(self) -> Dict[str, Any]:
+        return {
+            "color_cards": self.get_all_cards_json(),
+            "resample_applications": self.get_all_resample_applications_json()
+        }
 
 
 storage = MemoryStorage()

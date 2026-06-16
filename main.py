@@ -11,7 +11,10 @@ from models import (
     ProofingSubmit, InspectionSubmit, ReworkSubmit,
     ConfirmationSubmit, DiscardSubmit, Token, User,
     HighReworkBatchStats, PendingInspectionStats, ConfirmationCycleStats,
-    DashboardFilterParams, DashboardOverviewResponse, DashboardDetailResponse
+    DashboardFilterParams, DashboardOverviewResponse, DashboardDetailResponse,
+    ResampleApplication, ResampleApplicationCreate, ResampleStatus, ResamplePriority,
+    ResampleAcceptSubmit, ResampleRejectSubmit, ResampleCompleteSubmit,
+    ResampleFilterParams, ResampleDashboardOverview
 )
 from auth import authenticate_user, create_token_for_user, get_current_user
 from storage import storage
@@ -280,22 +283,139 @@ async def detect_all_risks():
     }
 
 
+@app.post("/resample", response_model=ResampleApplication)
+async def create_resample_application(
+    app_create: ResampleApplicationCreate,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        return storage.create_resample_application(app_create)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/resample", response_model=dict)
+async def list_resample_applications(
+    customer_code: Optional[str] = None,
+    fabric_type: Optional[str] = None,
+    responsible_team: Optional[str] = None,
+    priority: Optional[ResamplePriority] = None,
+    status: Optional[ResampleStatus] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000)
+):
+    filters = ResampleFilterParams(
+        customer_code=customer_code,
+        fabric_type=fabric_type,
+        responsible_team=responsible_team,
+        priority=priority,
+        status=status,
+        start_date=start_date,
+        end_date=end_date,
+        skip=skip,
+        limit=limit
+    )
+    apps, total = storage.list_resample_applications(filters)
+    return {"items": apps, "total": total, "skip": skip, "limit": limit}
+
+
+@app.get("/resample/{app_id}", response_model=ResampleApplication)
+async def get_resample_application(app_id: str):
+    app = storage.get_resample_application(app_id)
+    if not app:
+        raise HTTPException(status_code=404, detail=f"复样申请 {app_id} 不存在")
+    return app
+
+
+@app.put("/resample/{app_id}/accept", response_model=ResampleApplication)
+async def accept_resample_application(
+    app_id: str,
+    submit: ResampleAcceptSubmit,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        return storage.accept_resample_application(app_id, submit.operator, submit.remark)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/resample/{app_id}/reject", response_model=ResampleApplication)
+async def reject_resample_application(
+    app_id: str,
+    submit: ResampleRejectSubmit,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        return storage.reject_resample_application(app_id, submit.operator, submit.reason)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/resample/{app_id}/complete", response_model=ResampleApplication)
+async def complete_resample_application(
+    app_id: str,
+    submit: ResampleCompleteSubmit,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        return storage.complete_resample_application(app_id, submit.operator, submit.remark)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/resample/{app_id}/follow-up", response_model=ResampleApplication)
+async def add_resample_follow_up(
+    app_id: str,
+    submit: ResampleAcceptSubmit,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        return storage.add_resample_follow_up(app_id, submit.operator, submit.remark or "")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/dashboard/resample/overview", response_model=ResampleDashboardOverview)
+async def get_resample_dashboard_overview(
+    customer_code: Optional[str] = Query(None, description="客户编码"),
+    fabric_type: Optional[str] = Query(None, description="面料类型"),
+    responsible_team: Optional[str] = Query(None, description="负责人小组"),
+    priority: Optional[ResamplePriority] = Query(None, description="优先级"),
+    status: Optional[ResampleStatus] = Query(None, description="申请状态"),
+    start_date: Optional[date] = Query(None, description="开始日期 (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+    current_user: User = Depends(get_current_user)
+):
+    filters = ResampleFilterParams(
+        customer_code=customer_code,
+        fabric_type=fabric_type,
+        responsible_team=responsible_team,
+        priority=priority,
+        status=status,
+        start_date=start_date,
+        end_date=end_date
+    )
+    return storage.get_resample_dashboard_overview(filters)
+
+
 @app.get("/export/json")
 async def export_json():
-    data = storage.get_all_cards_json()
+    data = storage.get_full_export_data()
     return JSONResponse(
         content=data,
         media_type="application/json",
         headers={
-            "Content-Disposition": "attachment; filename=color_cards.json"
+            "Content-Disposition": "attachment; filename=color_cards_and_resamples.json"
         }
     )
 
 
 @app.get("/export/download")
 async def download_json_file():
-    data = storage.get_all_cards_json()
-    filename = "color_cards_export.json"
+    data = storage.get_full_export_data()
+    filename = "color_cards_full_export.json"
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2, default=str)
     return FileResponse(
