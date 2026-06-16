@@ -16,7 +16,9 @@ from models import (
     ResampleAcceptSubmit, ResampleRejectSubmit, ResampleCompleteSubmit,
     ResampleFilterParams, ResampleDashboardOverview,
     ResampleProofingSubmit, ResampleInspectionSubmit,
-    ResampleReworkSubmit, ResampleConfirmationSubmit
+    ResampleReworkSubmit, ResampleConfirmationSubmit,
+    DeliveryArchive, DeliveryArchiveCreate, ArchiveSourceType,
+    ArchiveFilterParams, ArchiveStatsResponse
 )
 from auth import authenticate_user, create_token_for_user, get_current_user
 from storage import storage
@@ -488,6 +490,146 @@ async def download_json_file(current_user: User = Depends(get_current_user)):
         filename,
         media_type="application/json",
         filename=filename
+    )
+
+
+@app.post("/archives", response_model=DeliveryArchive)
+async def create_delivery_archive(
+    archive_create: DeliveryArchiveCreate,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        return storage.create_delivery_archive(archive_create)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/archives", response_model=dict)
+async def list_delivery_archives(
+    customer_code: Optional[str] = Query(None, description="客户编码"),
+    fabric_type: Optional[str] = Query(None, description="面料类型"),
+    responsible_team: Optional[str] = Query(None, description="负责人小组"),
+    delivery_batch_no: Optional[str] = Query(None, description="交付批次号"),
+    source_type: Optional[ArchiveSourceType] = Query(None, description="来源类型"),
+    archivist: Optional[str] = Query(None, description="归档人"),
+    start_date: Optional[date] = Query(None, description="归档开始日期 (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="归档结束日期 (YYYY-MM-DD)"),
+    skip: int = Query(0, ge=0, description="跳过的记录数"),
+    limit: int = Query(100, ge=1, le=1000, description="返回的最大记录数"),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        ArchiveFilterParams.validate_date_range(start_date, end_date)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    filters = ArchiveFilterParams(
+        customer_code=customer_code,
+        fabric_type=fabric_type,
+        responsible_team=responsible_team,
+        delivery_batch_no=delivery_batch_no,
+        source_type=source_type,
+        archivist=archivist,
+        start_date=start_date,
+        end_date=end_date,
+        skip=skip,
+        limit=limit
+    )
+    archives, total = storage.list_delivery_archives(filters)
+    return {"items": archives, "total": total, "skip": skip, "limit": limit}
+
+
+@app.get("/archives/stats", response_model=ArchiveStatsResponse)
+async def get_archive_stats(
+    customer_code: Optional[str] = Query(None, description="客户编码"),
+    fabric_type: Optional[str] = Query(None, description="面料类型"),
+    responsible_team: Optional[str] = Query(None, description="负责人小组"),
+    delivery_batch_no: Optional[str] = Query(None, description="交付批次号"),
+    source_type: Optional[ArchiveSourceType] = Query(None, description="来源类型"),
+    archivist: Optional[str] = Query(None, description="归档人"),
+    start_date: Optional[date] = Query(None, description="归档开始日期 (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="归档结束日期 (YYYY-MM-DD)"),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        ArchiveFilterParams.validate_date_range(start_date, end_date)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    filters = ArchiveFilterParams(
+        customer_code=customer_code,
+        fabric_type=fabric_type,
+        responsible_team=responsible_team,
+        delivery_batch_no=delivery_batch_no,
+        source_type=source_type,
+        archivist=archivist,
+        start_date=start_date,
+        end_date=end_date
+    )
+    return storage.get_archive_stats(filters)
+
+
+@app.get("/archives/{archive_id}", response_model=DeliveryArchive)
+async def get_delivery_archive(
+    archive_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    archive = storage.get_delivery_archive(archive_id)
+    if not archive:
+        raise HTTPException(status_code=404, detail=f"归档记录 {archive_id} 不存在")
+    return archive
+
+
+@app.get("/archives/{archive_id}/export")
+async def export_single_archive(
+    archive_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        data = storage.get_single_archive_export(archive_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return JSONResponse(
+        content=data,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f"attachment; filename=delivery_archive_{archive_id}.json"
+        }
+    )
+
+
+@app.get("/archives/{archive_id}/download")
+async def download_single_archive_file(
+    archive_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        data = storage.get_single_archive_export(archive_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    filename = f"delivery_archive_{archive_id}.json"
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+    return FileResponse(
+        filename,
+        media_type="application/json",
+        filename=filename
+    )
+
+
+@app.get("/archives/export/all")
+async def export_all_archives(current_user: User = Depends(get_current_user)):
+    data = {
+        "delivery_archives": storage.get_all_archives_json()
+    }
+    return JSONResponse(
+        content=data,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": "attachment; filename=all_delivery_archives.json"
+        }
     )
 
 

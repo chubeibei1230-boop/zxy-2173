@@ -774,6 +774,609 @@ def test_resample_export_contains_data(token):
     print("[OK] 导出数据包含复样申请测试通过")
 
 
+def test_archive_unauthorized():
+    response = client.post(
+        "/archives",
+        json={
+            "source_type": "原色卡",
+            "source_id": "test-id",
+            "delivery_batch_no": "BATCH-001",
+            "delivery_target": "客户A",
+            "archivist": "归档人"
+        }
+    )
+    assert response.status_code == 401
+
+    response = client.get("/archives")
+    assert response.status_code == 401
+
+    response = client.get("/archives/stats")
+    assert response.status_code == 401
+
+    response = client.get("/archives/test-id")
+    assert response.status_code == 401
+
+    response = client.get("/archives/test-id/export")
+    assert response.status_code == 401
+    print("[OK] 归档模块未授权访问校验测试通过")
+
+
+import uuid as _uuid
+
+_archive_card_counter = 0
+_archive_resample_counter = 0
+
+
+def _create_confirmed_card_for_archive(token):
+    global _archive_card_counter
+    _archive_card_counter += 1
+    suffix = f"{_archive_card_counter:03d}-{_uuid.uuid4().hex[:6]}"
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post(
+        "/cards",
+        headers=headers,
+        json={
+            "customer_code": f"C-ARCH-{suffix}",
+            "fabric_type": f"面料-{suffix}",
+            "color_card_version": "V1",
+            "responsible_team": "A组"
+        }
+    )
+    assert response.status_code == 200, f"创建色卡失败: {response.status_code} {response.text}"
+    card_id = response.json()["id"]
+
+    client.put(f"/cards/{card_id}/proofing/start", headers=headers)
+    client.put(
+        f"/cards/{card_id}/proofing/complete",
+        headers=headers,
+        json={"dye_vat_batch": f"BATCH-ARCH-{suffix}", "proofing_process": "活性染料染色"}
+    )
+    client.put(
+        f"/cards/{card_id}/inspection",
+        headers=headers,
+        json={
+            "color_comparison_result": "ΔE=0.4",
+            "color_difference_value": 0.4,
+            "inspector": "质检员A",
+            "conclusion": "合格"
+        }
+    )
+    response = client.put(
+        f"/cards/{card_id}/confirm",
+        headers=headers,
+        json={"result": "通过", "confirmer": "客户张总"}
+    )
+    assert response.status_code == 200, f"确认色卡失败: {response.status_code} {response.text}"
+    assert response.json()["status"] == "已确认"
+    return card_id
+
+
+def _create_completed_resample_for_archive(token):
+    global _archive_resample_counter
+    _archive_resample_counter += 1
+    suffix = f"{_archive_resample_counter:03d}-{_uuid.uuid4().hex[:6]}"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.post(
+        "/cards",
+        headers=headers,
+        json={
+            "customer_code": f"C-RES-{suffix}",
+            "fabric_type": f"面料-RES-{suffix}",
+            "color_card_version": "V2",
+            "responsible_team": "B组"
+        }
+    )
+    assert response.status_code == 200, f"创建色卡失败: {response.status_code} {response.text}"
+    card_id = response.json()["id"]
+
+    client.put(f"/cards/{card_id}/proofing/start", headers=headers)
+    client.put(
+        f"/cards/{card_id}/proofing/complete",
+        headers=headers,
+        json={"dye_vat_batch": f"BATCH-RES-{suffix}", "proofing_process": "高温染色"}
+    )
+    client.put(
+        f"/cards/{card_id}/inspection",
+        headers=headers,
+        json={
+            "color_comparison_result": "ΔE=0.3",
+            "color_difference_value": 0.3,
+            "inspector": "质检员B",
+            "conclusion": "合格"
+        }
+    )
+    client.put(
+        f"/cards/{card_id}/confirm",
+        headers=headers,
+        json={"result": "通过", "confirmer": "客户李总"}
+    )
+
+    response = client.post(
+        "/resample",
+        headers=headers,
+        json={
+            "original_card_id": card_id,
+            "reason": "客户反馈颜色偏深需调整",
+            "applicant": "业务员小陈",
+            "expected_completion_date": "2025-04-01",
+            "customer_feedback": "客户希望颜色更浅一些",
+            "priority": "高"
+        }
+    )
+    assert response.status_code == 200, f"创建复样失败: {response.status_code} {response.text}"
+    app_id = response.json()["id"]
+
+    client.put(
+        f"/resample/{app_id}/accept",
+        headers=headers,
+        json={"operator": "主管王经理", "remark": "同意复样"}
+    )
+    client.put(
+        f"/resample/{app_id}/proofing/start",
+        headers=headers,
+        json={"operator": "打样员小李"}
+    )
+    client.put(
+        f"/resample/{app_id}/proofing/complete",
+        headers=headers,
+        json={
+            "dye_vat_batch": f"BATCH-RES-{suffix}-R1",
+            "proofing_process": "缩短染色时间",
+            "operator": "打样员小李"
+        }
+    )
+    client.put(
+        f"/resample/{app_id}/inspection",
+        headers=headers,
+        json={
+            "color_comparison_result": "ΔE=0.5",
+            "color_difference_value": 0.5,
+            "inspector": "质检员B",
+            "conclusion": "合格"
+        }
+    )
+    client.put(
+        f"/resample/{app_id}/confirm",
+        headers=headers,
+        json={"result": "通过", "confirmer": "客户李总"}
+    )
+    response = client.put(
+        f"/resample/{app_id}/complete",
+        headers=headers,
+        json={"operator": "技术员小赵", "remark": "复样完成"}
+    )
+    assert response.status_code == 200, f"完成复样失败: {response.status_code} {response.text}"
+    assert response.json()["status"] == "已完成"
+    return app_id
+
+
+def test_archive_confirmed_card(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    card_id = _create_confirmed_card_for_archive(token)
+    card_detail = client.get(f"/cards/{card_id}", headers=headers).json()
+
+    response = client.post(
+        "/archives",
+        headers=headers,
+        json={
+            "source_type": "原色卡",
+            "source_id": card_id,
+            "delivery_batch_no": "DELIVER-2025-0001",
+            "delivery_target": "上海XX服装有限公司",
+            "delivery_remark": "春季订单首批交付，共500米色卡",
+            "archivist": "业务主管王经理"
+        }
+    )
+    assert response.status_code == 200
+    archive_id = response.json()["id"]
+    assert response.json()["source_type"] == "原色卡"
+    assert response.json()["source_id"] == card_id
+    assert response.json()["source_status"] == "已确认"
+    assert response.json()["delivery_batch_no"] == "DELIVER-2025-0001"
+    assert response.json()["delivery_target"] == "上海XX服装有限公司"
+    assert response.json()["archivist"] == "业务主管王经理"
+    assert response.json()["customer_code"] == card_detail["customer_code"]
+    assert response.json()["fabric_type"] == card_detail["fabric_type"]
+    assert response.json()["color_card_snapshot"] is not None
+    assert response.json()["color_card_snapshot"]["id"] == card_id
+    assert response.json()["color_card_snapshot"]["status"] == "已确认"
+    assert len(response.json()["color_card_snapshot"]["proofing_records"]) == 1
+    assert len(response.json()["color_card_snapshot"]["inspection_records"]) == 1
+    assert response.json()["color_card_snapshot"]["confirmation_record"] is not None
+    print("[OK] 已确认原色卡归档测试通过")
+    return archive_id
+
+
+def test_archive_unconfirmed_card(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post(
+        "/cards",
+        headers=headers,
+        json={
+            "customer_code": "C-ARCHIVE-003",
+            "fabric_type": "纯棉",
+            "color_card_version": "V1",
+            "responsible_team": "C组"
+        }
+    )
+    unconfirmed_card_id = response.json()["id"]
+
+    response = client.post(
+        "/archives",
+        headers=headers,
+        json={
+            "source_type": "原色卡",
+            "source_id": unconfirmed_card_id,
+            "delivery_batch_no": "DELIVER-TEST",
+            "delivery_target": "测试客户",
+            "archivist": "测试归档人"
+        }
+    )
+    assert response.status_code == 400
+    assert "已确认" in response.json()["detail"]
+    print("[OK] 未确认色卡不能归档测试通过")
+
+
+def test_archive_completed_resample(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    app_id = _create_completed_resample_for_archive(token)
+    app_detail = client.get(f"/resample/{app_id}", headers=headers).json()
+
+    response = client.post(
+        "/archives",
+        headers=headers,
+        json={
+            "source_type": "复样申请",
+            "source_id": app_id,
+            "delivery_batch_no": "DELIVER-2025-0002",
+            "delivery_target": "杭州XX纺织品公司",
+            "delivery_remark": "复样调整后交付，客户已确认颜色",
+            "archivist": "业务主管李经理"
+        }
+    )
+    assert response.status_code == 200
+    archive_id = response.json()["id"]
+    assert response.json()["source_type"] == "复样申请"
+    assert response.json()["source_id"] == app_id
+    assert response.json()["source_status"] == "已完成"
+    assert response.json()["delivery_batch_no"] == "DELIVER-2025-0002"
+    assert response.json()["delivery_target"] == "杭州XX纺织品公司"
+    assert response.json()["archivist"] == "业务主管李经理"
+    assert response.json()["customer_code"] == app_detail["customer_code"]
+    assert response.json()["fabric_type"] == app_detail["fabric_type"]
+    assert response.json()["resample_snapshot"] is not None
+    assert response.json()["resample_snapshot"]["id"] == app_id
+    assert response.json()["resample_snapshot"]["status"] == "已完成"
+    assert response.json()["resample_snapshot"]["resample_status"] == "已确认"
+    assert len(response.json()["resample_snapshot"]["resample_proofing_records"]) == 1
+    assert len(response.json()["resample_snapshot"]["resample_inspection_records"]) == 1
+    assert response.json()["resample_snapshot"]["resample_confirmation_record"] is not None
+    assert len(response.json()["resample_snapshot"]["action_records"]) > 0
+    print("[OK] 已完成复样申请归档测试通过")
+    return archive_id
+
+
+def test_archive_uncompleted_resample(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    card_id = _create_confirmed_card_for_archive(token)
+
+    response = client.post(
+        "/resample",
+        headers=headers,
+        json={
+            "original_card_id": card_id,
+            "reason": "测试未完成复样归档",
+            "applicant": "测试员",
+            "expected_completion_date": "2025-05-01",
+            "customer_feedback": "测试反馈",
+            "priority": "中"
+        }
+    )
+    pending_app_id = response.json()["id"]
+
+    response = client.post(
+        "/archives",
+        headers=headers,
+        json={
+            "source_type": "复样申请",
+            "source_id": pending_app_id,
+            "delivery_batch_no": "DELIVER-TEST-2",
+            "delivery_target": "测试客户2",
+            "archivist": "测试归档人2"
+        }
+    )
+    assert response.status_code == 400
+    assert "已完成" in response.json()["detail"]
+    print("[OK] 未完成复样不能归档测试通过")
+
+
+def test_archive_duplicate(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    card_id = _create_confirmed_card_for_archive(token)
+
+    response = client.post(
+        "/archives",
+        headers=headers,
+        json={
+            "source_type": "原色卡",
+            "source_id": card_id,
+            "delivery_batch_no": "DELIVER-DUP-001",
+            "delivery_target": "重复测试客户",
+            "archivist": "归档人A"
+        }
+    )
+    assert response.status_code == 200
+
+    response = client.post(
+        "/archives",
+        headers=headers,
+        json={
+            "source_type": "原色卡",
+            "source_id": card_id,
+            "delivery_batch_no": "DELIVER-DUP-002",
+            "delivery_target": "重复测试客户",
+            "archivist": "归档人B"
+        }
+    )
+    assert response.status_code == 400
+    assert "已归档" in response.json()["detail"]
+    assert "不允许重复归档" in response.json()["detail"]
+    print("[OK] 重复归档校验测试通过")
+
+
+def test_get_archive_detail(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    card_id = _create_confirmed_card_for_archive(token)
+    card_detail = client.get(f"/cards/{card_id}", headers=headers).json()
+
+    response = client.post(
+        "/archives",
+        headers=headers,
+        json={
+            "source_type": "原色卡",
+            "source_id": card_id,
+            "delivery_batch_no": "DELIVER-DETAIL-001",
+            "delivery_target": "详情测试客户",
+            "delivery_remark": "测试详情页数据",
+            "archivist": "测试归档员"
+        }
+    )
+    archive_id = response.json()["id"]
+
+    response = client.get(f"/archives/{archive_id}", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == archive_id
+    assert data["source_type"] == "原色卡"
+    assert data["delivery_batch_no"] == "DELIVER-DETAIL-001"
+    assert "color_card_snapshot" in data
+    assert "archived_at" in data
+    assert "created_at" in data
+
+    snapshot = data["color_card_snapshot"]
+    assert snapshot["customer_code"] == card_detail["customer_code"]
+    assert snapshot["fabric_type"] == card_detail["fabric_type"]
+    assert snapshot["status"] == "已确认"
+    assert len(snapshot["proofing_records"]) >= 0
+    assert len(snapshot["inspection_records"]) >= 0
+    assert len(snapshot["rework_records"]) >= 0
+    assert snapshot["confirmation_record"] is not None
+    print("[OK] 归档详情页测试通过")
+
+
+def test_list_archives(token):
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.get("/archives", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert "items" in data
+    assert "total" in data
+    assert isinstance(data["items"], list)
+    assert data["total"] >= 0
+    print("[OK] 归档列表接口测试通过")
+
+
+def test_filter_archives(token):
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.get(
+        "/archives?source_type=原色卡",
+        headers=headers
+    )
+    assert response.status_code == 200
+    data = response.json()
+    for item in data["items"]:
+        assert item["source_type"] == "原色卡"
+
+    response = client.get(
+        "/archives?responsible_team=A组",
+        headers=headers
+    )
+    assert response.status_code == 200
+    data = response.json()
+    for item in data["items"]:
+        assert item["responsible_team"] == "A组"
+
+    response = client.get(
+        "/archives?responsible_team=B组",
+        headers=headers
+    )
+    assert response.status_code == 200
+    data = response.json()
+    for item in data["items"]:
+        assert item["responsible_team"] == "B组"
+
+    response = client.get(
+        f"/archives?delivery_batch_no=DELIVER-2025-0001",
+        headers=headers
+    )
+    assert response.status_code == 200
+    data = response.json()
+    for item in data["items"]:
+        assert item["delivery_batch_no"] == "DELIVER-2025-0001"
+    print("[OK] 归档筛选功能测试通过")
+
+
+def test_archive_stats(token):
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.get("/archives/stats", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert "filter_params" in data
+    assert "summary" in data
+    assert "customer_stats" in data
+    assert "fabric_stats" in data
+    assert "team_stats" in data
+    assert "batch_stats" in data
+    assert "source_type_stats" in data
+    assert "archivist_stats" in data
+
+    summary = data["summary"]
+    assert "total_count" in summary
+    assert "original_card_count" in summary
+    assert "resample_count" in summary
+    assert "customer_count" in summary
+    assert "fabric_count" in summary
+    assert "team_count" in summary
+    assert "batch_count" in summary
+
+    assert isinstance(data["customer_stats"], list)
+    assert isinstance(data["fabric_stats"], list)
+    assert isinstance(data["team_stats"], list)
+    assert isinstance(data["batch_stats"], list)
+    assert isinstance(data["source_type_stats"], list)
+    assert isinstance(data["archivist_stats"], list)
+    print("[OK] 归档统计接口测试通过")
+
+
+def test_archive_stats_with_filter(token):
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.get(
+        "/archives/stats?source_type=原色卡&responsible_team=A组",
+        headers=headers
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["filter_params"]["source_type"] == "原色卡"
+    assert data["filter_params"]["responsible_team"] == "A组"
+    print("[OK] 归档统计筛选功能测试通过")
+
+
+def test_archive_date_validation(token):
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.get(
+        "/archives?start_date=2025-01-01&end_date=2024-01-01",
+        headers=headers
+    )
+    assert response.status_code == 400
+    assert "开始日期不能大于结束日期" in response.json()["detail"]
+
+    response = client.get(
+        "/archives/stats?start_date=2025-01-01&end_date=2024-01-01",
+        headers=headers
+    )
+    assert response.status_code == 400
+    assert "开始日期不能大于结束日期" in response.json()["detail"]
+    print("[OK] 归档日期范围验证测试通过")
+
+
+def test_single_archive_export(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    card_id = _create_confirmed_card_for_archive(token)
+
+    response = client.post(
+        "/archives",
+        headers=headers,
+        json={
+            "source_type": "原色卡",
+            "source_id": card_id,
+            "delivery_batch_no": "DELIVER-EXPORT-001",
+            "delivery_target": "导出测试客户",
+            "delivery_remark": "测试单条导出功能",
+            "archivist": "导出测试员"
+        }
+    )
+    archive_id = response.json()["id"]
+
+    response = client.get(f"/archives/{archive_id}/export", headers=headers)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    data = response.json()
+    assert data["id"] == archive_id
+    assert data["delivery_batch_no"] == "DELIVER-EXPORT-001"
+    assert "color_card_snapshot" in data
+    print("[OK] 单条归档数据导出测试通过")
+
+
+def test_archive_not_found(token):
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.get("/archives/non-existent-id", headers=headers)
+    assert response.status_code == 404
+    assert "不存在" in response.json()["detail"]
+
+    response = client.get("/archives/non-existent-id/export", headers=headers)
+    assert response.status_code == 404
+    assert "不存在" in response.json()["detail"]
+    print("[OK] 归档记录不存在校验测试通过")
+
+
+def test_archive_pagination(token):
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = client.get(
+        "/archives?skip=0&limit=5",
+        headers=headers
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["items"]) <= 5
+    assert data["skip"] == 0
+    assert data["limit"] == 5
+    print("[OK] 归档列表分页功能测试通过")
+
+
+def test_archive_snapshot_contains_risk_info(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    card_id = _create_confirmed_card_for_archive(token)
+
+    response = client.post(
+        "/archives",
+        headers=headers,
+        json={
+            "source_type": "原色卡",
+            "source_id": card_id,
+            "delivery_batch_no": "DELIVER-RISK-001",
+            "delivery_target": "风险快照测试客户",
+            "archivist": "测试员"
+        }
+    )
+    archive_id = response.json()["id"]
+
+    response = client.get(f"/archives/{archive_id}", headers=headers)
+    data = response.json()
+    assert "color_card_snapshot" in data
+    snapshot = data["color_card_snapshot"]
+    assert "risk_alerts" in snapshot
+    assert isinstance(snapshot["risk_alerts"], list)
+    print("[OK] 归档快照包含风险处理信息测试通过")
+
+
+def test_full_export_contains_archives(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get("/archives/export/all", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert "delivery_archives" in data
+    assert isinstance(data["delivery_archives"], list)
+    print("[OK] 全量归档导出测试通过")
+
+
 def test_resample_dashboard_overview(token):
     headers = {"Authorization": f"Bearer {token}"}
     response = client.get("/dashboard/resample/overview", headers=headers)
@@ -871,6 +1474,28 @@ def run_all_tests():
         test_resample_dashboard_overview(token)
         test_resample_dashboard_filter(token)
         test_resample_export_contains_data(token)
+        
+        print("-" * 60)
+        print("开始色卡交付归档模块测试")
+        print("-" * 60)
+        
+        test_archive_unauthorized()
+        test_archive_unconfirmed_card(token)
+        test_archive_uncompleted_resample(token)
+        archive_id_1 = test_archive_confirmed_card(token)
+        archive_id_2 = test_archive_completed_resample(token)
+        test_archive_duplicate(token)
+        test_get_archive_detail(token)
+        test_list_archives(token)
+        test_filter_archives(token)
+        test_archive_stats(token)
+        test_archive_stats_with_filter(token)
+        test_archive_date_validation(token)
+        test_single_archive_export(token)
+        test_archive_not_found(token)
+        test_archive_pagination(token)
+        test_archive_snapshot_contains_risk_info(token)
+        test_full_export_contains_archives(token)
         
         print("=" * 60)
         print("[PASS] 所有API测试通过！")

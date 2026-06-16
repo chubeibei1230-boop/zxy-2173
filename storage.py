@@ -14,7 +14,10 @@ from models import (
     ResampleStatusSummary, ResampleDimensionStats, ResampleDashboardOverview,
     ResampleProofingRecord, ResampleInspectionRecord, ResampleReworkRecord,
     ResampleConfirmationRecord, ResampleProofingSubmit, ResampleInspectionSubmit,
-    ResampleReworkSubmit, ResampleConfirmationSubmit
+    ResampleReworkSubmit, ResampleConfirmationSubmit,
+    ArchiveSourceType, ColorCardSnapshot, ResampleApplicationSnapshot,
+    DeliveryArchive, DeliveryArchiveCreate, ArchiveFilterParams,
+    ArchiveStatsSummary, ArchiveDimensionStats, ArchiveStatsResponse
 )
 from config import (
     REWORK_THRESHOLD, INSPECTION_OVERDUE_HOURS,
@@ -26,6 +29,7 @@ class MemoryStorage:
     def __init__(self):
         self.cards: Dict[str, ColorCard] = {}
         self.resample_applications: Dict[str, ResampleApplication] = {}
+        self.delivery_archives: Dict[str, DeliveryArchive] = {}
         self._init_sample_data()
 
     def _init_sample_data(self):
@@ -962,6 +966,240 @@ class MemoryStorage:
             "color_cards": self.get_all_cards_json(),
             "resample_applications": self.get_all_resample_applications_json()
         }
+
+    def _build_color_card_snapshot(self, card: ColorCard) -> ColorCardSnapshot:
+        return ColorCardSnapshot(
+            id=card.id,
+            customer_code=card.customer_code,
+            fabric_type=card.fabric_type,
+            color_card_version=card.color_card_version,
+            responsible_team=card.responsible_team,
+            status=card.status,
+            proofing_records=[pr.model_copy() for pr in card.proofing_records],
+            inspection_records=[ir.model_copy() for ir in card.inspection_records],
+            rework_records=[rr.model_copy() for rr in card.rework_records],
+            confirmation_record=card.confirmation_record.model_copy() if card.confirmation_record else None,
+            risk_alerts=[ra.model_copy() for ra in card.risk_alerts],
+            created_at=card.created_at,
+            updated_at=card.updated_at
+        )
+
+    def _build_resample_snapshot(self, app: ResampleApplication) -> ResampleApplicationSnapshot:
+        return ResampleApplicationSnapshot(
+            id=app.id,
+            original_card_id=app.original_card_id,
+            reason=app.reason,
+            applicant=app.applicant,
+            expected_completion_date=app.expected_completion_date,
+            customer_feedback=app.customer_feedback,
+            priority=app.priority,
+            status=app.status,
+            customer_code=app.customer_code,
+            fabric_type=app.fabric_type,
+            color_card_version=app.color_card_version,
+            responsible_team=app.responsible_team,
+            original_confirmation_record=app.original_confirmation_record.model_copy() if app.original_confirmation_record else None,
+            resample_status=app.resample_status,
+            resample_proofing_records=[pr.model_copy() for pr in app.resample_proofing_records],
+            resample_inspection_records=[ir.model_copy() for ir in app.resample_inspection_records],
+            resample_rework_records=[rr.model_copy() for rr in app.resample_rework_records],
+            resample_confirmation_record=app.resample_confirmation_record.model_copy() if app.resample_confirmation_record else None,
+            action_records=[ar.model_copy() for ar in app.action_records],
+            rejection_reason=app.rejection_reason,
+            completion_remark=app.completion_remark,
+            created_at=app.created_at,
+            updated_at=app.updated_at
+        )
+
+    def _check_source_already_archived(self, source_type: ArchiveSourceType, source_id: str) -> bool:
+        for archive in self.delivery_archives.values():
+            if archive.source_type == source_type and archive.source_id == source_id:
+                return True
+        return False
+
+    def create_delivery_archive(self, archive_create: DeliveryArchiveCreate) -> DeliveryArchive:
+        if self._check_source_already_archived(archive_create.source_type, archive_create.source_id):
+            raise ValueError(f"{archive_create.source_type.value} {archive_create.source_id} 已归档，不允许重复归档")
+
+        color_card_snapshot = None
+        resample_snapshot = None
+        source_status = ""
+        customer_code = ""
+        fabric_type = ""
+        color_card_version = ""
+        responsible_team = ""
+
+        if archive_create.source_type == ArchiveSourceType.ORIGINAL_CARD:
+            card = self.get_card(archive_create.source_id)
+            if not card:
+                raise ValueError(f"原色卡 {archive_create.source_id} 不存在")
+            if card.status != CardStatus.CONFIRMED:
+                raise ValueError(f"只有已确认的原色卡才能归档，当前状态：{card.status}")
+            source_status = card.status.value
+            customer_code = card.customer_code
+            fabric_type = card.fabric_type
+            color_card_version = card.color_card_version
+            responsible_team = card.responsible_team
+            color_card_snapshot = self._build_color_card_snapshot(card)
+
+        elif archive_create.source_type == ArchiveSourceType.RESAMPLE:
+            app = self.get_resample_application(archive_create.source_id)
+            if not app:
+                raise ValueError(f"复样申请 {archive_create.source_id} 不存在")
+            if app.status != ResampleStatus.COMPLETED:
+                raise ValueError(f"只有已完成的复样申请才能归档，当前状态：{app.status}")
+            source_status = app.status.value
+            customer_code = app.customer_code
+            fabric_type = app.fabric_type
+            color_card_version = app.color_card_version
+            responsible_team = app.responsible_team
+            resample_snapshot = self._build_resample_snapshot(app)
+
+        archive_id = str(uuid.uuid4())
+        now = datetime.now()
+        archive = DeliveryArchive(
+            id=archive_id,
+            source_type=archive_create.source_type,
+            source_id=archive_create.source_id,
+            source_status=source_status,
+            delivery_batch_no=archive_create.delivery_batch_no,
+            delivery_target=archive_create.delivery_target,
+            delivery_remark=archive_create.delivery_remark,
+            archivist=archive_create.archivist,
+            customer_code=customer_code,
+            fabric_type=fabric_type,
+            color_card_version=color_card_version,
+            responsible_team=responsible_team,
+            color_card_snapshot=color_card_snapshot,
+            resample_snapshot=resample_snapshot,
+            created_at=now,
+            archived_at=now
+        )
+
+        self.delivery_archives[archive_id] = archive
+        return archive
+
+    def get_delivery_archive(self, archive_id: str) -> Optional[DeliveryArchive]:
+        return self.delivery_archives.get(archive_id)
+
+    def list_delivery_archives(self, filters: ArchiveFilterParams) -> Tuple[List[DeliveryArchive], int]:
+        result = list(self.delivery_archives.values())
+
+        if filters.customer_code:
+            result = [a for a in result if a.customer_code == filters.customer_code]
+        if filters.fabric_type:
+            result = [a for a in result if a.fabric_type == filters.fabric_type]
+        if filters.responsible_team:
+            result = [a for a in result if a.responsible_team == filters.responsible_team]
+        if filters.delivery_batch_no:
+            result = [a for a in result if a.delivery_batch_no == filters.delivery_batch_no]
+        if filters.source_type:
+            result = [a for a in result if a.source_type == filters.source_type]
+        if filters.archivist:
+            result = [a for a in result if a.archivist == filters.archivist]
+        if filters.start_date:
+            start_dt = datetime.combine(filters.start_date, datetime.min.time())
+            result = [a for a in result if a.archived_at >= start_dt]
+        if filters.end_date:
+            end_dt = datetime.combine(filters.end_date, datetime.max.time())
+            result = [a for a in result if a.archived_at <= end_dt]
+
+        result.sort(key=lambda x: x.archived_at, reverse=True)
+
+        total = len(result)
+        result = result[filters.skip:filters.skip + filters.limit]
+        return result, total
+
+    def _calculate_archive_dimension_stats(
+        self, archives: List[DeliveryArchive], dimension_field: str
+    ) -> List[ArchiveDimensionStats]:
+        stats_map: Dict[str, ArchiveDimensionStats] = defaultdict(
+            lambda: ArchiveDimensionStats(dimension_key="")
+        )
+
+        for archive in archives:
+            key = getattr(archive, dimension_field)
+            stat = stats_map[key]
+            stat.dimension_key = key
+            stat.total_count += 1
+            if archive.source_type == ArchiveSourceType.ORIGINAL_CARD:
+                stat.original_card_count += 1
+            elif archive.source_type == ArchiveSourceType.RESAMPLE:
+                stat.resample_count += 1
+
+        return list(stats_map.values())
+
+    def get_archive_stats(self, filters: ArchiveFilterParams) -> ArchiveStatsResponse:
+        all_archives = list(self.delivery_archives.values())
+        filtered = all_archives
+
+        if filters.customer_code:
+            filtered = [a for a in filtered if a.customer_code == filters.customer_code]
+        if filters.fabric_type:
+            filtered = [a for a in filtered if a.fabric_type == filters.fabric_type]
+        if filters.responsible_team:
+            filtered = [a for a in filtered if a.responsible_team == filters.responsible_team]
+        if filters.delivery_batch_no:
+            filtered = [a for a in filtered if a.delivery_batch_no == filters.delivery_batch_no]
+        if filters.source_type:
+            filtered = [a for a in filtered if a.source_type == filters.source_type]
+        if filters.archivist:
+            filtered = [a for a in filtered if a.archivist == filters.archivist]
+        if filters.start_date:
+            start_dt = datetime.combine(filters.start_date, datetime.min.time())
+            filtered = [a for a in filtered if a.archived_at >= start_dt]
+        if filters.end_date:
+            end_dt = datetime.combine(filters.end_date, datetime.max.time())
+            filtered = [a for a in filtered if a.archived_at <= end_dt]
+
+        summary = ArchiveStatsSummary()
+        summary.total_count = len(filtered)
+        summary.original_card_count = sum(1 for a in filtered if a.source_type == ArchiveSourceType.ORIGINAL_CARD)
+        summary.resample_count = sum(1 for a in filtered if a.source_type == ArchiveSourceType.RESAMPLE)
+        summary.customer_count = len(set(a.customer_code for a in filtered))
+        summary.fabric_count = len(set(a.fabric_type for a in filtered))
+        summary.team_count = len(set(a.responsible_team for a in filtered))
+        summary.batch_count = len(set(a.delivery_batch_no for a in filtered))
+
+        customer_stats = self._calculate_archive_dimension_stats(filtered, "customer_code")
+        fabric_stats = self._calculate_archive_dimension_stats(filtered, "fabric_type")
+        team_stats = self._calculate_archive_dimension_stats(filtered, "responsible_team")
+        batch_stats = self._calculate_archive_dimension_stats(filtered, "delivery_batch_no")
+        archivist_stats = self._calculate_archive_dimension_stats(filtered, "archivist")
+
+        source_type_map: Dict[str, ArchiveDimensionStats] = defaultdict(
+            lambda: ArchiveDimensionStats(dimension_key="")
+        )
+        for archive in filtered:
+            key = archive.source_type.value
+            stat = source_type_map[key]
+            stat.dimension_key = key
+            stat.total_count += 1
+            if archive.source_type == ArchiveSourceType.ORIGINAL_CARD:
+                stat.original_card_count += 1
+            elif archive.source_type == ArchiveSourceType.RESAMPLE:
+                stat.resample_count += 1
+        source_type_stats = list(source_type_map.values())
+
+        return ArchiveStatsResponse(
+            filter_params=filters,
+            summary=summary,
+            customer_stats=customer_stats,
+            fabric_stats=fabric_stats,
+            team_stats=team_stats,
+            batch_stats=batch_stats,
+            source_type_stats=source_type_stats,
+            archivist_stats=archivist_stats
+        )
+
+    def get_single_archive_export(self, archive_id: str) -> Dict[str, Any]:
+        archive = self.get_delivery_archive(archive_id)
+        if not archive:
+            raise ValueError(f"归档记录 {archive_id} 不存在")
+        return archive.model_dump(mode='json')
+
+    def get_all_archives_json(self) -> List[Dict]:
+        return [a.model_dump(mode='json') for a in self.delivery_archives.values()]
 
 
 storage = MemoryStorage()

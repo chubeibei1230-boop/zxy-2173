@@ -406,3 +406,129 @@ class ResampleDashboardOverview(BaseModel):
     customer_stats: List[ResampleDimensionStats]
     team_stats: List[ResampleDimensionStats]
     priority_stats: List[ResampleDimensionStats]
+
+
+class ArchiveSourceType(str, Enum):
+    ORIGINAL_CARD = "原色卡"
+    RESAMPLE = "复样申请"
+
+
+class ColorCardSnapshot(BaseModel):
+    id: str
+    customer_code: str
+    fabric_type: str
+    color_card_version: str
+    responsible_team: str
+    status: CardStatus
+    proofing_records: List[ProofingRecord] = Field(default_factory=list)
+    inspection_records: List[InspectionRecord] = Field(default_factory=list)
+    rework_records: List[ReworkRecord] = Field(default_factory=list)
+    confirmation_record: Optional[ConfirmationRecord] = None
+    risk_alerts: List[RiskAlert] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ResampleApplicationSnapshot(BaseModel):
+    id: str
+    original_card_id: str
+    reason: str
+    applicant: str
+    expected_completion_date: date
+    customer_feedback: str
+    priority: ResamplePriority
+    status: ResampleStatus
+    customer_code: str
+    fabric_type: str
+    color_card_version: str
+    responsible_team: str
+    original_confirmation_record: Optional[ConfirmationRecord] = None
+    resample_status: CardStatus
+    resample_proofing_records: List[ResampleProofingRecord] = Field(default_factory=list)
+    resample_inspection_records: List[ResampleInspectionRecord] = Field(default_factory=list)
+    resample_rework_records: List[ResampleReworkRecord] = Field(default_factory=list)
+    resample_confirmation_record: Optional[ResampleConfirmationRecord] = None
+    action_records: List[ResampleActionRecord] = Field(default_factory=list)
+    rejection_reason: Optional[str] = None
+    completion_remark: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DeliveryArchiveBase(BaseModel):
+    source_type: ArchiveSourceType
+    source_id: str
+
+
+class DeliveryArchiveCreate(DeliveryArchiveBase):
+    delivery_batch_no: str
+    delivery_target: str
+    delivery_remark: Optional[str] = None
+    archivist: str
+
+
+class DeliveryArchive(BaseModel):
+    id: str
+    source_type: ArchiveSourceType
+    source_id: str
+    source_status: str
+    delivery_batch_no: str
+    delivery_target: str
+    delivery_remark: Optional[str] = None
+    archivist: str
+    customer_code: str
+    fabric_type: str
+    color_card_version: str
+    responsible_team: str
+    color_card_snapshot: Optional[ColorCardSnapshot] = None
+    resample_snapshot: Optional[ResampleApplicationSnapshot] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+    archived_at: datetime = Field(default_factory=datetime.now)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ArchiveFilterParams(BaseModel):
+    customer_code: Optional[str] = None
+    fabric_type: Optional[str] = None
+    responsible_team: Optional[str] = None
+    delivery_batch_no: Optional[str] = None
+    source_type: Optional[ArchiveSourceType] = None
+    archivist: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    skip: int = 0
+    limit: int = 100
+
+    @classmethod
+    def validate_date_range(cls, start_date: Optional[date], end_date: Optional[date]):
+        if start_date and end_date and start_date > end_date:
+            raise ValueError("开始日期不能大于结束日期")
+
+
+class ArchiveStatsSummary(BaseModel):
+    total_count: int = 0
+    original_card_count: int = 0
+    resample_count: int = 0
+    customer_count: int = 0
+    fabric_count: int = 0
+    team_count: int = 0
+    batch_count: int = 0
+
+
+class ArchiveDimensionStats(BaseModel):
+    dimension_key: str
+    total_count: int = 0
+    original_card_count: int = 0
+    resample_count: int = 0
+
+
+class ArchiveStatsResponse(BaseModel):
+    filter_params: ArchiveFilterParams
+    summary: ArchiveStatsSummary
+    customer_stats: List[ArchiveDimensionStats]
+    fabric_stats: List[ArchiveDimensionStats]
+    team_stats: List[ArchiveDimensionStats]
+    batch_stats: List[ArchiveDimensionStats]
+    source_type_stats: List[ArchiveDimensionStats]
+    archivist_stats: List[ArchiveDimensionStats]
