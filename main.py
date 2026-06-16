@@ -87,14 +87,25 @@ async def get_color_card(card_id: str):
     return card
 
 
-@app.put("/cards/{card_id}/proofing", response_model=ColorCard)
-async def submit_proofing(
+@app.put("/cards/{card_id}/proofing/start", response_model=ColorCard)
+async def start_proofing(
+    card_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        return storage.start_proofing(card_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/cards/{card_id}/proofing/complete", response_model=ColorCard)
+async def complete_proofing(
     card_id: str,
     submit: ProofingSubmit,
     current_user: User = Depends(get_current_user)
 ):
     try:
-        return storage.add_proofing(
+        return storage.complete_proofing(
             card_id, submit.dye_vat_batch, submit.proofing_process
         )
     except ValueError as e:
@@ -193,13 +204,20 @@ async def detect_team_high_rework_rate():
     return {"risks": storage.detect_team_high_rework_rate()}
 
 
+@app.get("/risks/inspection-overdue")
+async def detect_inspection_overdue():
+    return {"risks": storage.detect_inspection_overdue()}
+
+
 @app.get("/risks/detect-all")
 async def detect_all_risks():
     color_diff_risks = storage.detect_color_difference_cluster()
     team_risks = storage.detect_team_high_rework_rate()
+    overdue_risks = storage.detect_inspection_overdue()
     return {
         "color_difference_cluster_risks": color_diff_risks,
-        "team_high_rework_rate_risks": team_risks
+        "team_high_rework_rate_risks": team_risks,
+        "inspection_overdue_risks": overdue_risks
     }
 
 

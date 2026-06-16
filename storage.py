@@ -46,7 +46,7 @@ class MemoryStorage:
             if (card.customer_code == card_create.customer_code and
                 card.fabric_type == card_create.fabric_type and
                 card.color_card_version == card_create.color_card_version and
-                card.status not in [CardStatus.DISCARDED, CardStatus.CONFIRMED]):
+                card.status != CardStatus.DISCARDED):
                 raise ValueError(f"客户 {card_create.customer_code} 的 {card_create.fabric_type} 在版本 {card_create.color_card_version} 下已存在有效色卡")
 
         card_id = str(uuid.uuid4())
@@ -98,12 +98,23 @@ class MemoryStorage:
         card.updated_at = datetime.now()
         return card
 
-    def add_proofing(self, card_id: str, dye_vat_batch: str, proofing_process: str) -> ColorCard:
+    def start_proofing(self, card_id: str) -> ColorCard:
         card = self.get_card(card_id)
         if not card:
             raise ValueError(f"色卡 {card_id} 不存在")
         if card.status not in [CardStatus.PENDING_PROOFING, CardStatus.REWORKING]:
-            raise ValueError(f"当前状态 {card.status} 不允许提交打样")
+            raise ValueError(f"当前状态 {card.status} 不允许开始打样")
+
+        card.status = CardStatus.PROOFING
+        card.updated_at = datetime.now()
+        return card
+
+    def complete_proofing(self, card_id: str, dye_vat_batch: str, proofing_process: str) -> ColorCard:
+        card = self.get_card(card_id)
+        if not card:
+            raise ValueError(f"色卡 {card_id} 不存在")
+        if card.status != CardStatus.PROOFING:
+            raise ValueError(f"当前状态 {card.status} 不允许完成打样")
 
         record = ProofingRecord(
             id=str(uuid.uuid4()),
@@ -137,14 +148,21 @@ class MemoryStorage:
         self._check_risks(card)
         return card
 
+    def _has_valid_inspection_after_last_proofing(self, card: ColorCard) -> bool:
+        if not card.inspection_records or not card.proofing_records:
+            return False
+        last_proofing_time = card.proofing_records[-1].created_at
+        last_inspection_time = card.inspection_records[-1].created_at
+        return last_inspection_time > last_proofing_time
+
     def add_rework(self, card_id: str, rework_action: str, reason: str, operator: str) -> ColorCard:
         card = self.get_card(card_id)
         if not card:
             raise ValueError(f"色卡 {card_id} 不存在")
         if card.status != CardStatus.PENDING_INSPECTION:
             raise ValueError(f"当前状态 {card.status} 不允许返调")
-        if not card.inspection_records:
-            raise ValueError("返调前必须存在质检结论")
+        if not self._has_valid_inspection_after_last_proofing(card):
+            raise ValueError("返调前必须存在本次打样后的质检结论")
 
         record = ReworkRecord(
             id=str(uuid.uuid4()),
@@ -164,8 +182,8 @@ class MemoryStorage:
             raise ValueError(f"色卡 {card_id} 不存在")
         if card.status != CardStatus.PENDING_INSPECTION:
             raise ValueError(f"当前状态 {card.status} 不允许确认")
-        if not card.inspection_records:
-            raise ValueError("确认前必须存在质检结论")
+        if not self._has_valid_inspection_after_last_proofing(card):
+            raise ValueError("确认前必须存在本次打样后的质检结论")
 
         record = ConfirmationRecord(
             id=str(uuid.uuid4()),
@@ -261,6 +279,28 @@ class MemoryStorage:
                         "total_cards": stats["total"],
                         "reworked_cards": stats["reworked"],
                         "rework_rate": rate
+                    })
+        return result
+
+    def detect_inspection_overdue(self) -> List[Dict]:
+        now = datetime.now()
+        result = []
+
+        for card in self.cards.values():
+            if card.status == CardStatus.PENDING_INSPECTION and card.submitted_for_inspection_at:
+                overdue_time = card.submitted_for_inspection_at + timedelta(hours=INSPECTION_OVERDUE_HOURS)
+                if now > overdue_time:
+                    overdue_hours = round((now - card.submitted_for_inspection_at).total_seconds() / 3600, 1)
+                    self._add_risk_alert(
+                        card, RiskType.INSPECTION_OVERDUE,
+                        f"质检已超期 {overdue_hours} 小时"
+                    )
+                    result.append({
+                        "card_id": card.id,
+                        "customer_code": card.customer_code,
+                        "fabric_type": card.fabric_type,
+                        "overdue_hours": overdue_hours,
+                        "submitted_at": card.submitted_for_inspection_at
                     })
         return result
 
