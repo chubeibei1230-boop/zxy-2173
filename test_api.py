@@ -247,6 +247,61 @@ def test_dashboard_pagination(token):
     print("[OK] 看板分页功能测试通过")
 
 
+def test_dashboard_fabric_dimension(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get("/dashboard/overview", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert "fabric_dimension_stats" in data
+    assert isinstance(data["fabric_dimension_stats"], list)
+    print("[OK] 看板面料维度统计测试通过")
+
+
+def test_dashboard_inspection_record_detail(token, card_id):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get(
+        f"/dashboard/detail?customer_code=C100",
+        headers=headers
+    )
+    assert response.status_code == 200
+    data = response.json()
+    if data["items"]:
+        item = data["items"][0]
+        assert "last_inspection_record" in item
+        if item["last_inspection_record"]:
+            assert "conclusion" in item["last_inspection_record"]
+            assert "inspector" in item["last_inspection_record"]
+            assert "color_comparison_result" in item["last_inspection_record"]
+    print("[OK] 看表明细质检记录详情测试通过")
+
+
+def test_dashboard_date_field_filter(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get(
+        "/dashboard/overview?date_field=创建时间",
+        headers=headers
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["filter_params"]["date_field"] == "创建时间"
+    print("[OK] 看板时间维度筛选测试通过")
+
+
+def test_dashboard_confirmed_risk_resolved(token):
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get(
+        "/dashboard/detail?status=已确认",
+        headers=headers
+    )
+    assert response.status_code == 200
+    data = response.json()
+    for item in data["items"]:
+        if item["current_status"] == "已确认":
+            assert item["current_risk_status"] == "正常"
+            assert item["risk_level"] == "none"
+    print("[OK] 已确认色卡风险自动解决测试通过")
+
+
 def test_unauthorized():
     response = client.post(
         "/cards",
@@ -289,6 +344,10 @@ def run_all_tests():
         test_dashboard_filter(token)
         test_dashboard_date_validation(token)
         test_dashboard_pagination(token)
+        test_dashboard_fabric_dimension(token)
+        test_dashboard_inspection_record_detail(token, card_id)
+        test_dashboard_date_field_filter(token)
+        test_dashboard_confirmed_risk_resolved(token)
         
         print("=" * 60)
         print("[PASS] 所有API测试通过！")

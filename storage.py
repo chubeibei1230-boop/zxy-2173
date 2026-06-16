@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 
 from models import (
-    ColorCard, ColorCardCreate, CardStatus, RiskAlert, RiskType,
+    ColorCard, ColorCardCreate, CardStatus, RiskAlert, RiskType, DateFieldType,
     ProofingRecord, InspectionRecord, ReworkRecord, ConfirmationRecord,
     FilterParams, HighReworkBatchStats, PendingInspectionStats, ConfirmationCycleStats,
     DashboardFilterParams, StatusSummary, DimensionStats, CardDetailItem,
@@ -147,6 +147,7 @@ class MemoryStorage:
         )
         card.inspection_records.append(record)
         card.updated_at = datetime.now()
+        self._resolve_risk_by_type(card, RiskType.INSPECTION_OVERDUE)
         self._check_risks(card)
         return card
 
@@ -195,6 +196,9 @@ class MemoryStorage:
         card.confirmation_record = record
         card.status = CardStatus.CONFIRMED
         card.updated_at = datetime.now()
+        for alert in card.risk_alerts:
+            if not alert.resolved:
+                alert.resolved = True
         return card
 
     def discard_card(self, card_id: str, reason: str) -> ColorCard:
@@ -215,6 +219,11 @@ class MemoryStorage:
                 message=message
             )
             card.risk_alerts.append(alert)
+
+    def _resolve_risk_by_type(self, card: ColorCard, risk_type: RiskType):
+        for alert in card.risk_alerts:
+            if alert.type == risk_type and not alert.resolved:
+                alert.resolved = True
 
     def _check_risks(self, card: ColorCard):
         if len(card.rework_records) >= REWORK_THRESHOLD:
@@ -378,6 +387,19 @@ class MemoryStorage:
                 return card
         raise ValueError(f"风险预警 {alert_id} 不存在")
 
+    def _get_card_date_by_field(self, card: ColorCard, date_field: DateFieldType) -> Optional[datetime]:
+        if date_field == DateFieldType.CREATED_AT:
+            return card.created_at
+        elif date_field == DateFieldType.UPDATED_AT:
+            return card.updated_at
+        elif date_field == DateFieldType.PROOFING_AT:
+            return card.proofing_records[-1].created_at if card.proofing_records else None
+        elif date_field == DateFieldType.INSPECTION_AT:
+            return card.inspection_records[-1].created_at if card.inspection_records else None
+        elif date_field == DateFieldType.CONFIRMATION_AT:
+            return card.confirmation_record.created_at if card.confirmation_record else None
+        return None
+
     def _filter_cards_by_dashboard_params(self, filters: DashboardFilterParams) -> List[ColorCard]:
         result = list(self.cards.values())
 
@@ -389,12 +411,23 @@ class MemoryStorage:
             result = [c for c in result if c.responsible_team == filters.responsible_team]
         if filters.status:
             result = [c for c in result if c.status == filters.status]
-        if filters.start_date:
-            start_dt = datetime.combine(filters.start_date, datetime.min.time())
-            result = [c for c in result if c.created_at >= start_dt]
-        if filters.end_date:
-            end_dt = datetime.combine(filters.end_date, datetime.max.time())
-            result = [c for c in result if c.created_at <= end_dt]
+
+        if filters.start_date or filters.end_date:
+            filtered = []
+            for card in result:
+                card_date = self._get_card_date_by_field(card, filters.date_field)
+                if card_date is None:
+                    continue
+                if filters.start_date:
+                    start_dt = datetime.combine(filters.start_date, datetime.min.time())
+                    if card_date < start_dt:
+                        continue
+                if filters.end_date:
+                    end_dt = datetime.combine(filters.end_date, datetime.max.time())
+                    if card_date > end_dt:
+                        continue
+                filtered.append(card)
+            result = filtered
 
         return result
 
@@ -502,7 +535,7 @@ class MemoryStorage:
             responsible_team=card.responsible_team,
             current_status=card.status,
             last_proofing_record=last_proofing,
-            last_inspection_conclusion=last_inspection.conclusion if last_inspection else None,
+            last_inspection_record=last_inspection,
             current_risk_status=risk_status,
             risk_level=risk_level,
             next_suggested_action=self._get_next_suggested_action(card),
@@ -514,12 +547,14 @@ class MemoryStorage:
         cards = self._filter_cards_by_dashboard_params(filters)
         status_summary = self._calculate_status_summary(cards)
         customer_stats = self._calculate_dimension_stats(cards, "customer_code")
+        fabric_stats = self._calculate_dimension_stats(cards, "fabric_type")
         team_stats = self._calculate_dimension_stats(cards, "responsible_team")
 
         return DashboardOverviewResponse(
             filter_params=filters,
             status_summary=status_summary,
             customer_dimension_stats=customer_stats,
+            fabric_dimension_stats=fabric_stats,
             team_dimension_stats=team_stats
         )
 

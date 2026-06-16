@@ -7,7 +7,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 
 from models import (
-    ColorCard, ColorCardCreate, CardStatus, FilterParams,
+    ColorCard, ColorCardCreate, CardStatus, FilterParams, DateFieldType,
     ProofingSubmit, InspectionSubmit, ReworkSubmit,
     ConfirmationSubmit, DiscardSubmit, Token, User,
     HighReworkBatchStats, PendingInspectionStats, ConfirmationCycleStats,
@@ -201,6 +201,7 @@ async def get_dashboard_overview(
     fabric_type: Optional[str] = Query(None, description="面料类型"),
     responsible_team: Optional[str] = Query(None, description="负责人小组"),
     status: Optional[CardStatus] = Query(None, description="当前状态"),
+    date_field: DateFieldType = Query(DateFieldType.CREATED_AT, description="时间范围统计依据"),
     start_date: Optional[date] = Query(None, description="开始日期 (YYYY-MM-DD)"),
     end_date: Optional[date] = Query(None, description="结束日期 (YYYY-MM-DD)"),
     current_user: User = Depends(get_current_user)
@@ -215,6 +216,7 @@ async def get_dashboard_overview(
         fabric_type=fabric_type,
         responsible_team=responsible_team,
         status=status,
+        date_field=date_field,
         start_date=start_date,
         end_date=end_date
     )
@@ -227,6 +229,7 @@ async def get_dashboard_detail(
     fabric_type: Optional[str] = Query(None, description="面料类型"),
     responsible_team: Optional[str] = Query(None, description="负责人小组"),
     status: Optional[CardStatus] = Query(None, description="当前状态"),
+    date_field: DateFieldType = Query(DateFieldType.CREATED_AT, description="时间范围统计依据"),
     start_date: Optional[date] = Query(None, description="开始日期 (YYYY-MM-DD)"),
     end_date: Optional[date] = Query(None, description="结束日期 (YYYY-MM-DD)"),
     skip: int = Query(0, ge=0, description="跳过的记录数"),
@@ -243,6 +246,7 @@ async def get_dashboard_detail(
         fabric_type=fabric_type,
         responsible_team=responsible_team,
         status=status,
+        date_field=date_field,
         start_date=start_date,
         end_date=end_date
     )

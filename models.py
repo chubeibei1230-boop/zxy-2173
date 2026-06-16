@@ -20,6 +20,14 @@ class RiskType(str, Enum):
     TEAM_HIGH_REWORK_RATE = "小组返调率偏高"
 
 
+class DateFieldType(str, Enum):
+    CREATED_AT = "创建时间"
+    PROOFING_AT = "最近打样时间"
+    INSPECTION_AT = "最近质检时间"
+    CONFIRMATION_AT = "确认时间"
+    UPDATED_AT = "更新时间"
+
+
 class ProofingRecord(BaseModel):
     id: str
     dye_vat_batch: str
@@ -164,6 +172,7 @@ class DashboardFilterParams(BaseModel):
     fabric_type: Optional[str] = None
     responsible_team: Optional[str] = None
     status: Optional[CardStatus] = None
+    date_field: DateFieldType = DateFieldType.CREATED_AT
     start_date: Optional[date] = None
     end_date: Optional[date] = None
 
@@ -200,7 +209,7 @@ class CardDetailItem(BaseModel):
     responsible_team: str
     current_status: CardStatus
     last_proofing_record: Optional[ProofingRecord] = None
-    last_inspection_conclusion: Optional[str] = None
+    last_inspection_record: Optional[InspectionRecord] = None
     current_risk_status: str = "正常"
     risk_level: str = "none"
     next_suggested_action: str
@@ -212,6 +221,7 @@ class DashboardOverviewResponse(BaseModel):
     filter_params: DashboardFilterParams
     status_summary: StatusSummary
     customer_dimension_stats: List[DimensionStats]
+    fabric_dimension_stats: List[DimensionStats]
     team_dimension_stats: List[DimensionStats]
 
 
